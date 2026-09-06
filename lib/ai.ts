@@ -34,6 +34,8 @@ CORE PRINCIPLE:
 - "selectedText" is WHAT THE USER ACTUALLY SELECTED (the explanation target).
 - "context" is ONLY the immediate surrounding sentence/clause provided as background reference.
 - NEVER confuse the two. Do not explain the entire context when the user selected a single word!
+- "selectedText" must be a meaningful, searchable target. If the text appears slightly incomplete or malformed due to browser selection artifacts, determine the intended word using the immediate context only if strongly supported. Never invent an unrelated word.
+- Never treat random punctuation or corrupted fragments as legitimate English phrases.
 
 SELECTION-AWARE RULES:
 

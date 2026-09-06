@@ -79,22 +79,70 @@ type PdfSelectionData = {
   rect: DOMRect;
 };
 
+const COMMON_TECH_TOKENS = new Set([
+  "c++", "c#", "f#", ".net", "asp.net", "node.js", "next.js", "vue.js", "react.js",
+  "nuxt.js", "nest.js", "express.js", "three.js", "d3.js", "angular.js", "backbone.js",
+  "rxjs", "graphql", "postgresql", "mysql", "nosql", "sqlite", "mongodb",
+  "tensorflow", "pytorch", "opencv", "langchain", "langgraph", "scikit-learn",
+  "rag", "llm", "nlp", "ocr", "api", "sdk", "cli", "gui", "ui", "ux", "css", "html"
+]);
+
+function isTechnicalToken(word: string): boolean {
+  if (!word) return false;
+  const lower = word.toLowerCase().trim();
+  if (COMMON_TECH_TOKENS.has(lower)) return true;
+  if (/^c\+\+$/i.test(lower) || /^c#$/i.test(lower) || /^f#$/i.test(lower)) return true;
+  if (/^\.?[a-z0-9_-]+(\.[a-z0-9_-]+)+$/i.test(lower)) return true;
+  return false;
+}
+
+function isMeaningfulWord(word: string): boolean {
+  if (!word) return false;
+  const trimmed = word.trim();
+  if (!trimmed) return false;
+  if (isTechnicalToken(trimmed)) return true;
+  if (/^[^\w\s]+$/.test(trimmed)) return false;
+  if (/^[a-zA-Z]$/.test(trimmed)) return trimmed === "a" || trimmed === "A" || trimmed === "I";
+  if (/^[a-zA-Z]+([’'-][a-zA-Z]+)*$/.test(trimmed)) return true;
+  if (/^[a-zA-Z0-9]+([’'-][a-zA-Z0-9]+)*$/.test(trimmed) && /[a-zA-Z]/.test(trimmed)) return true;
+  return false;
+}
+
+function extractTokensFromText(text: string): string[] {
+  if (!text) return [];
+  const matches = text.match(/(?:\bC\+\+|\bC#|\.NET\b|\b[a-zA-Z0-9_-]+\.js\b|\b[a-zA-Z0-9]+(?:['’][a-zA-Z0-9]+)?(?:-[a-zA-Z0-9]+)*\b)/gi);
+  return matches ? Array.from(matches) : [];
+}
+
 function cleanSelection(value: string): string {
   if (!value) return "";
   let text = healText(value);
+
+  if (isTechnicalToken(text)) return text;
 
   // 1. Clean leading sentence boundary bleed from adjacent spans/previous line:
   // e.g. "s. Now that he knew..." -> "Now that he knew..."
   text = text.replace(/^[a-zA-Z0-9]{1,2}[.!?]\s+(?=[A-Z0-9])/g, "");
   text = text.replace(/^[.!?]\s+(?=[A-Z0-9])/g, "");
 
-  // 2. Clean leading 1-letter boundary bleed for single words / short phrases:
+  // 2. Clean leading symbol/punctuation bleed preceding an alphanumeric token:
+  // e.g. "++, JavaS" -> "JavaS"
+  if (!isTechnicalToken(text)) {
+    text = text.replace(/^[+*\/=<>~`|^&%$@!?:;,\s]+(?=[a-zA-Z0-9])/g, "");
+  }
+
+  // 3. Clean leading 1-letter boundary bleed for single words / short phrases:
   // e.g. "t night" -> "night"
   text = text.replace(/^([b-hj-zB-HJ-Z])\s+([a-zA-Z]{2,}.*)$/g, "$2");
 
-  // 3. Clean trailing bleed after sentence terminators:
+  // 4. Clean trailing bleed after sentence terminators:
   // e.g. "lifestyle. S" -> "lifestyle."
   text = text.replace(/([.!?])\s+[a-zA-Z0-9]{1,2}$/g, "$1");
+
+  // 5. Clean trailing stray punctuation:
+  if (!isTechnicalToken(text)) {
+    text = text.replace(/\s*[,;:|\/]+$/g, "");
+  }
 
   return text.trim();
 }
@@ -105,59 +153,101 @@ function resolveSelectionCandidate(
   suffixAttached: string = "",
   surroundingText: string = ""
 ): { originalSelection: string; resolvedSelection: string; selectionType: PdfSelectionData["selectionType"] } {
-  const original = cleanSelection(selectedText);
+  const original = (selectedText ?? "").trim();
   if (!original) {
     return { originalSelection: "", resolvedSelection: "", selectionType: "unknown" };
   }
 
-  // If already multiple words / sentence / passage, preserve as-is
-  if (/\s/.test(original)) {
-    return { originalSelection: original, resolvedSelection: original, selectionType: classify(original) };
+  // 1. Direct Technical Token Check
+  if (isTechnicalToken(original)) {
+    return { originalSelection: original, resolvedSelection: original, selectionType: "word" };
   }
 
-  // 1. Direct DOM boundaries (prefixAttached + original + suffixAttached)
+  // 2. Pure punctuation / symbol handling (e.g. selecting "++" next to "C")
+  if (/^[^\w\s]+$/.test(original)) {
+    const cleanPrefix = prefixAttached.replace(/^.*[\s.,;:!?()[\]{}'’"]/, "");
+    if (cleanPrefix && isTechnicalToken(`${cleanPrefix}${original}`)) {
+      return { originalSelection: original, resolvedSelection: `${cleanPrefix}${original}`, selectionType: "word" };
+    }
+    if (surroundingText) {
+      const tokens = extractTokensFromText(surroundingText);
+      const techMatch = tokens.find((t) => isTechnicalToken(t) && t.includes(original));
+      if (techMatch) {
+        return { originalSelection: original, resolvedSelection: techMatch, selectionType: "word" };
+      }
+    }
+    return { originalSelection: original, resolvedSelection: original, selectionType: "unknown" };
+  }
+
+  const cleaned = cleanSelection(original);
+  if (!cleaned || !/[a-zA-Z0-9]/.test(cleaned)) {
+    return { originalSelection: original, resolvedSelection: original, selectionType: "unknown" };
+  }
+
+  // 3. Complete Sentence / Passage Check
+  const sentenceCount = (cleaned.match(/[.!?](?:\s|$)/g) ?? []).length;
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  if (sentenceCount > 1 || words.length > 40) {
+    return { originalSelection: original, resolvedSelection: cleaned, selectionType: "passage" };
+  }
+  if (sentenceCount === 1 || (words.length >= 6 && /^[A-Z]/.test(cleaned)) || words.length >= 8 || /[.!?]$/.test(cleaned)) {
+    return { originalSelection: original, resolvedSelection: cleaned, selectionType: "sentence" };
+  }
+
+  // 4. Multi-word Phrase Check
+  if (words.length > 1 && !/^[+*\/=<>~`|^&%$@!?:;,\s]+/.test(original)) {
+    if (words.every((w) => isMeaningfulWord(w))) {
+      return { originalSelection: original, resolvedSelection: cleaned, selectionType: "phrase" };
+    }
+  }
+
+  // 5. Word / Fragment Recovery (e.g. "++, JavaS" -> "JavaS" -> "JavaScript")
+  const targetFragment = words.length === 1 ? words[0] : cleaned;
+
   const cleanPrefix = prefixAttached.replace(/^.*[\s.,;:!?()[\]{}'’"]/, "");
   const cleanSuffix = suffixAttached.replace(/[\s.,;:!?()[\]{}'’"].*$/, "");
-  const hasPrefix = cleanPrefix.length > 0 && /^[a-zA-Z0-9'’-]+$/.test(cleanPrefix);
-  const hasSuffix = cleanSuffix.length > 0 && /^[a-zA-Z0-9'’-]+$/.test(cleanSuffix);
-
-  if ((hasPrefix || hasSuffix) && /^[a-zA-Z0-9'’-]+$/.test(original)) {
-    const fullWord = cleanSelection(`${cleanPrefix}${original}${cleanSuffix}`);
-    if (fullWord.toLowerCase() !== original.toLowerCase() && fullWord.length > original.length) {
-      return {
-        originalSelection: original,
-        resolvedSelection: fullWord,
-        selectionType: "partial-word"
-      };
+  if ((cleanPrefix || cleanSuffix) && /^[a-zA-Z0-9'’+#.-]+$/.test(targetFragment)) {
+    const fullWord = cleanSelection(`${cleanPrefix}${targetFragment}${cleanSuffix}`);
+    if (fullWord.toLowerCase() !== targetFragment.toLowerCase() && fullWord.length > targetFragment.length) {
+      return { originalSelection: original, resolvedSelection: fullWord, selectionType: "partial-word" };
     }
   }
 
-  // 2. Immediate surrounding text search for partial word (e.g. "congratulat" -> "congratulations")
-  if (surroundingText && original.length >= 3 && /^[a-zA-Z0-9'’-]+$/.test(original)) {
-    const words = surroundingText.match(/[a-zA-Z0-9'’-]+/g) || [];
-    const lowerOrig = original.toLowerCase();
-    const match = words.find((w) => {
-      const lowerW = w.toLowerCase();
-      return lowerW !== lowerOrig && (lowerW.startsWith(lowerOrig) || lowerW.endsWith(lowerOrig) || (lowerOrig.length >= 4 && lowerW.includes(lowerOrig)));
+  if (surroundingText && targetFragment.length >= 2) {
+    const tokens = extractTokensFromText(surroundingText);
+    const lowerTarget = targetFragment.toLowerCase();
+
+    const exactMatch = tokens.find((t) => t.toLowerCase() === lowerTarget);
+    if (exactMatch && isMeaningfulWord(exactMatch) && !/^[+*\/=<>~`|^&%$@!?:;,\s]+/.test(original)) {
+      return { originalSelection: original, resolvedSelection: exactMatch, selectionType: "word" };
+    }
+
+    const candidate = tokens.find((t) => {
+      const lowerT = t.toLowerCase();
+      return lowerT !== lowerTarget && (
+        lowerT.startsWith(lowerTarget) ||
+        lowerT.endsWith(lowerTarget) ||
+        (lowerTarget.length >= 4 && lowerT.includes(lowerTarget))
+      );
     });
 
-    if (match && match.length > original.length) {
-      return {
-        originalSelection: original,
-        resolvedSelection: match,
-        selectionType: "partial-word"
-      };
+    if (candidate && candidate.length > targetFragment.length) {
+      return { originalSelection: original, resolvedSelection: candidate, selectionType: "partial-word" };
     }
   }
 
-  return { originalSelection: original, resolvedSelection: original, selectionType: classify(original) };
+  if (isMeaningfulWord(cleaned)) {
+    return { originalSelection: original, resolvedSelection: cleaned, selectionType: "word" };
+  }
+
+  return { originalSelection: original, resolvedSelection: cleaned, selectionType: classify(cleaned) };
 }
 
 function handleSelection(): void {
   const selection = window.getSelection();
   const rawSelected = selection?.toString() ?? "";
-  const selectedText = cleanSelection(rawSelected);
-  if (!selection || selection.rangeCount === 0 || !selectedText) return;
+  const trimmedRaw = (rawSelected ?? "").trim();
+  if (!selection || selection.rangeCount === 0 || !trimmedRaw) return;
 
   const range = selection.getRangeAt(0);
   const page = (range.commonAncestorContainer.parentElement ?? range.commonAncestorContainer as Element).closest<HTMLElement>(".page");
@@ -170,18 +260,22 @@ function handleSelection(): void {
   let suffixAttached = "";
   if (range.startContainer.nodeType === Node.TEXT_NODE) {
     const textBefore = (range.startContainer.textContent || "").slice(0, range.startOffset);
-    const match = textBefore.match(/[a-zA-Z0-9'’-]+$/);
+    const match = textBefore.match(/[a-zA-Z0-9'’+#.-]+$/);
     if (match) prefixAttached = match[0];
   }
   if (range.endContainer.nodeType === Node.TEXT_NODE) {
     const textAfter = (range.endContainer.textContent || "").slice(range.endOffset);
-    const match = textAfter.match(/^[a-zA-Z0-9'’-]+/);
+    const match = textAfter.match(/^[a-zA-Z0-9'’+#.-]+/);
     if (match) suffixAttached = match[0];
   }
 
-  const localText = extractLocalPdfText(page, range, selectedText);
-  const candidate = resolveSelectionCandidate(selectedText, prefixAttached, suffixAttached, localText);
-  const sentence = extractSentence(localText, candidate.resolvedSelection || selectedText);
+  const localText = extractLocalPdfText(page, range, trimmedRaw);
+  const candidate = resolveSelectionCandidate(trimmedRaw, prefixAttached, suffixAttached, localText);
+
+  // Reject purely invalid selections (like isolated punctuation with no meaning)
+  if (candidate.selectionType === "unknown" || !candidate.resolvedSelection) return;
+
+  const sentence = extractSentence(localText, candidate.resolvedSelection || trimmedRaw);
 
   showPopup({
     originalSelection: candidate.originalSelection,

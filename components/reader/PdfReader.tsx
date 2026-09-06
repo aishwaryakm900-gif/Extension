@@ -116,8 +116,7 @@ export default function PdfReader() {
     window.setTimeout(() => {
       const selection = window.getSelection();
       const rawSelected = selection?.toString() ?? "";
-      const selectedText = cleanSelection(rawSelected);
-      if (!selection || selection.rangeCount === 0 || !selectedText) return;
+      if (!selection || selection.rangeCount === 0 || !rawSelected.trim()) return;
 
       const range = selection.getRangeAt(0);
       const rect = range.getBoundingClientRect();
@@ -126,24 +125,32 @@ export default function PdfReader() {
       let suffixAttached = "";
       if (range.startContainer.nodeType === Node.TEXT_NODE) {
         const textBefore = (range.startContainer.textContent || "").slice(0, range.startOffset);
-        const match = textBefore.match(/[a-zA-Z0-9'’-]+$/);
+        const match = textBefore.match(/[a-zA-Z0-9'’+#.-]+$/);
         if (match) prefixAttached = match[0];
       }
       if (range.endContainer.nodeType === Node.TEXT_NODE) {
         const textAfter = (range.endContainer.textContent || "").slice(range.endOffset);
-        const match = textAfter.match(/^[a-zA-Z0-9'’-]+/);
+        const match = textAfter.match(/^[a-zA-Z0-9'’+#.-]+/);
         if (match) suffixAttached = match[0];
       }
 
-      const surroundingLine = page.lines.find((l) => l.toLowerCase().includes(selectedText.toLowerCase())) || "";
-      const analysis = resolveSelectionCandidate(selectedText, prefixAttached, suffixAttached, surroundingLine);
-      const termToUse = analysis.resolvedSelection || selectedText;
+      const cleanedQuery = cleanSelection(rawSelected).toLowerCase();
+      const surroundingLine = page.lines.find((l) => l.toLowerCase().includes(cleanedQuery)) ||
+        page.lines.find((l) => l.toLowerCase().includes(rawSelected.toLowerCase().trim())) ||
+        findLocalParagraph(page, rawSelected);
+      const analysis = resolveSelectionCandidate(rawSelected, prefixAttached, suffixAttached, surroundingLine);
+
+      if (analysis.selectionType === "unknown" || (!analysis.resolvedSelection && !analysis.originalSelection)) {
+        return;
+      }
+
+      const termToUse = analysis.resolvedSelection || analysis.originalSelection;
       const localParagraph = findLocalParagraph(page, termToUse);
 
       const context = buildReadingContext({
         selectedText: termToUse,
         originalSelection: analysis.originalSelection,
-        resolvedSelection: termToUse,
+        resolvedSelection: analysis.resolvedSelection,
         selectionType: analysis.selectionType,
         paragraph: localParagraph,
         pageTitle: fileName,
