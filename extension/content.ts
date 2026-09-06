@@ -57,9 +57,10 @@ function healText(value: string): string {
   // Heal common prefix splits (e.g. "inter view" -> "interview")
   text = text.replace(/\b(inter)\s+(view|views|viewed|viewing)\b/gi, "$1$2");
 
-  // Reconnect detached apostrophes (e.g. "Layla ’ s" -> "Layla’s", "don ' t" -> "don't")
-  text = text.replace(/([a-zA-Z0-9]+)\s*['’`´]\s*([a-zA-Z]+)/g, "$1’$2");
-  text = text.replace(/([a-zA-Z0-9]+s)\s*['’`´](?=\s|$|[.,;:!?])/g, "$1’");
+  // Reconnect detached apostrophes without changing quote character (e.g. "don ' t" -> "don't")
+  text = text.replace(/([a-zA-Z0-9]+)\s+(['’`´])\s*([a-zA-Z]+)/g, "$1$2$3");
+  text = text.replace(/([a-zA-Z0-9]+)\s*(['’`´])\s+([a-zA-Z]+)/g, "$1$2$3");
+  text = text.replace(/([a-zA-Z0-9]+s)\s+(['’`´])(?=\s|$|[.,;:!?])/g, "$1$2");
 
   // Fix spaces before punctuation
   text = text.replace(/\s+([,.:;!?])/g, "$1");
@@ -241,13 +242,55 @@ function extractSentenceFromText(text: string, selectedText: string): string {
   return result || selected;
 }
 
-function analyzeSelection(selection: Selection, range: Range): {
+function cleanSelection(value: string): string {
+  if (!value) return "";
+  let text = healText(value);
+
+  // 1. Clean leading sentence boundary bleed from adjacent spans/previous line:
+  // e.g. "s. Now that he knew..." -> "Now that he knew..."
+  text = text.replace(/^[a-zA-Z0-9]{1,2}[.!?]\s+(?=[A-Z0-9])/g, "");
+  text = text.replace(/^[.!?]\s+(?=[A-Z0-9])/g, "");
+
+  // 2. Clean leading 1-letter boundary bleed for single words / short phrases:
+  // e.g. "t night" -> "night"
+  text = text.replace(/^([b-hj-zB-HJ-Z])\s+([a-zA-Z]{2,}.*)$/g, "$2");
+
+  // 3. Clean trailing bleed after sentence terminators:
+  // e.g. "lifestyle. S" -> "lifestyle."
+  text = text.replace(/([.!?])\s+[a-zA-Z0-9]{1,2}$/g, "$1");
+
+  return text.trim();
+}
+
+function isReaderAiNativePage(): boolean {
+  if (typeof document === "undefined") return false;
+  try {
+    if ((window as unknown as { __READER_AI_NATIVE__?: boolean }).__READER_AI_NATIVE__ === true) {
+      return true;
+    }
+    if (document.documentElement.getAttribute("data-reader-ai") === "true") {
+      return true;
+    }
+    if (document.querySelector(".pdf-reader-shell") || document.querySelector(".reader-ai-popup")) {
+      return true;
+    }
+    const path = (window.location.pathname || "").toLowerCase();
+    if (path.startsWith("/reader") || path.includes("/reader/pdf")) {
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+function analyzeSelection(selection: Selection, range: Range, surroundingText: string = ""): {
   originalSelection: string;
   resolvedSelection: string;
   selectionType: SelectionData["selectionType"];
 } {
   const raw = selection.toString();
-  const originalSelection = healText(raw);
+  const originalSelection = cleanSelection(raw);
 
   if (!originalSelection || !/[a-zA-Z0-9]/.test(originalSelection)) {
     return {
@@ -259,8 +302,13 @@ function analyzeSelection(selection: Selection, range: Range): {
 
   // If multiple words
   if (/\s/.test(originalSelection)) {
+    const words = originalSelection.split(/\s+/).filter(Boolean);
     const count = (originalSelection.match(/[.!?](?:\s|$)/g) ?? []).length;
-    const selectionType = count > 1 ? "passage" : (count === 1 && originalSelection.length > 35) ? "sentence" : "phrase";
+    const selectionType = (count > 1 || words.length > 40)
+      ? "passage"
+      : (count === 1 || (words.length >= 6 && /^[A-Z]/.test(originalSelection)) || words.length >= 8 || /[.!?]$/.test(originalSelection))
+      ? "sentence"
+      : "phrase";
     return {
       originalSelection,
       resolvedSelection: originalSelection,
@@ -285,11 +333,28 @@ function analyzeSelection(selection: Selection, range: Range): {
   }
 
   if ((prefixAttached || suffixAttached) && /^[a-zA-Z0-9'’-]+$/.test(originalSelection)) {
-    const fullWord = healText(`${prefixAttached}${originalSelection}${suffixAttached}`);
+    const fullWord = cleanSelection(`${prefixAttached}${originalSelection}${suffixAttached}`);
     if (fullWord.toLowerCase() !== originalSelection.toLowerCase() && fullWord.length > originalSelection.length) {
       return {
         originalSelection,
         resolvedSelection: fullWord,
+        selectionType: "partial-word"
+      };
+    }
+  }
+
+  // Also check surrounding text in container for word completion (e.g. "congratulat" -> "congratulations")
+  if (surroundingText && originalSelection.length >= 3 && /^[a-zA-Z0-9'’-]+$/.test(originalSelection)) {
+    const words = surroundingText.match(/[a-zA-Z0-9'’-]+/g) || [];
+    const lowerOrig = originalSelection.toLowerCase();
+    const match = words.find((w) => {
+      const lowerW = w.toLowerCase();
+      return lowerW !== lowerOrig && (lowerW.startsWith(lowerOrig) || lowerW.endsWith(lowerOrig) || (lowerOrig.length >= 4 && lowerW.includes(lowerOrig)));
+    });
+    if (match && match.length > originalSelection.length) {
+      return {
+        originalSelection,
+        resolvedSelection: match,
         selectionType: "partial-word"
       };
     }
@@ -303,6 +368,12 @@ function analyzeSelection(selection: Selection, range: Range): {
 }
 
 function removePopup(): void {
+  try {
+    const existingHosts = document.querySelectorAll(`#${HOST_ID}`);
+    existingHosts.forEach((host) => host.remove());
+  } catch {
+    // ignore
+  }
   popupHost?.remove();
   popupHost = null;
   popupRoot = null;
@@ -695,6 +766,12 @@ function renderPopup(data: SelectionData, range: Range): void {
 }
 
 function inspectSelection(): void {
+  // If the user is on the native Reader AI app / PDF reader, do not inject extension popup
+  if (isReaderAiNativePage()) {
+    removePopup();
+    return;
+  }
+
   // If the user is actively interacting with the popup, don't re-inspect or remove
   if (interactingWithPopup) return;
 
@@ -705,7 +782,9 @@ function inspectSelection(): void {
   }
 
   const range = selection.getRangeAt(0);
-  const analysis = analyzeSelection(selection, range);
+  const container = getClosestTextContainer(range);
+  const selectedParagraph = extractCleanTextFromContainer(container, range.commonAncestorContainer);
+  const analysis = analyzeSelection(selection, range, selectedParagraph);
 
   if (analysis.selectionType === "unknown" || !analysis.originalSelection) {
     removePopup();
@@ -718,8 +797,6 @@ function inspectSelection(): void {
     return;
   }
 
-  const container = getClosestTextContainer(range);
-  const selectedParagraph = extractCleanTextFromContainer(container, range.commonAncestorContainer);
   const sentence = extractSentenceFromText(selectedParagraph, analysis.resolvedSelection || analysis.originalSelection);
 
   renderPopup({

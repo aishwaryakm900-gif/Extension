@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
-import { buildReadingContext, healExtractedText, analyzeSelectionBoundaries, type ReadingContext } from "../../lib/reading-context";
+import { buildReadingContext, healExtractedText, cleanSelection, resolveSelectionCandidate, type ReadingContext } from "../../lib/reading-context";
 
 // The worker is emitted by Next's client bundle, so the PDF bytes remain local.
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
@@ -45,12 +45,18 @@ export default function PdfReader() {
   const [error, setError] = useState("");
 
   useEffect(() => {
+    document.documentElement.setAttribute("data-reader-ai", "true");
+    (window as unknown as { __READER_AI_NATIVE__?: boolean }).__READER_AI_NATIVE__ = true;
     const handleScroll = () => {
       const page = document.elementFromPoint(window.innerWidth / 2, 180)?.closest<HTMLElement>("[data-page-number]");
       if (page?.dataset.pageNumber) setActivePage(Number(page.dataset.pageNumber));
     };
     window.addEventListener("scroll", handleScroll, { passive: true });
-    return () => window.removeEventListener("scroll", handleScroll);
+    return () => {
+      document.documentElement.removeAttribute("data-reader-ai");
+      delete (window as unknown as { __READER_AI_NATIVE__?: boolean }).__READER_AI_NATIVE__;
+      window.removeEventListener("scroll", handleScroll);
+    };
   }, []);
 
   async function openPdf(file: File) {
@@ -110,7 +116,7 @@ export default function PdfReader() {
     window.setTimeout(() => {
       const selection = window.getSelection();
       const rawSelected = selection?.toString() ?? "";
-      const selectedText = healExtractedText(rawSelected);
+      const selectedText = cleanSelection(rawSelected);
       if (!selection || selection.rangeCount === 0 || !selectedText) return;
 
       const range = selection.getRangeAt(0);
@@ -129,7 +135,8 @@ export default function PdfReader() {
         if (match) suffixAttached = match[0];
       }
 
-      const analysis = analyzeSelectionBoundaries(selectedText, prefixAttached, suffixAttached);
+      const surroundingLine = page.lines.find((l) => l.toLowerCase().includes(selectedText.toLowerCase())) || "";
+      const analysis = resolveSelectionCandidate(selectedText, prefixAttached, suffixAttached, surroundingLine);
       const termToUse = analysis.resolvedSelection || selectedText;
       const localParagraph = findLocalParagraph(page, termToUse);
 
@@ -144,10 +151,12 @@ export default function PdfReader() {
         pageNumber: page.pageNumber
       });
 
+      const position = computePopupPosition(rect, 240, 320);
+
       setPopup({
         context,
-        left: Math.max(16, Math.min(rect.left, window.innerWidth - 336)),
-        top: Math.max(16, Math.min(rect.bottom + 12, window.innerHeight - 220))
+        left: position.left,
+        top: position.top
       });
       setExplanation(null);
       setError("");
@@ -189,9 +198,13 @@ export default function PdfReader() {
   }
 
   return (
-    <main className="pdf-reader-shell" onMouseDown={(event) => {
-      if (!(event.target as HTMLElement).closest(".reader-ai-popup")) setPopup(null);
-    }}>
+    <main
+      className="pdf-reader-shell"
+      data-reader-ai="true"
+      onMouseDown={(event) => {
+        if (!(event.target as HTMLElement).closest(".reader-ai-popup")) setPopup(null);
+      }}
+    >
       <header className="pdf-reader-header">
         <div className="pdf-brand"><span>✦</span> READER AI</div>
         <div className="pdf-actions">
@@ -217,44 +230,141 @@ export default function PdfReader() {
 
       <footer className="pdf-reader-footer"><span>{pages.length ? `Page ${activePage} / ${pages.length}` : "Text-based PDFs processed locally"}</span><span>{status}</span></footer>
 
-      {popup && <section className="reader-ai-popup" style={{ left: popup.left, top: popup.top }} onMouseDown={(event) => event.stopPropagation()}>
-        <div className="reader-popup-heading"><span>✦ READER AI</span><button type="button" aria-label="Close" onClick={() => setPopup(null)}>×</button></div>
-        {!explanation && !loading && <>
-          {popup.context.selectionType === "partial-word" ? (
-            <>
-              <div className="popup-label">DID YOU MEAN?</div>
-              <h2>{popup.context.resolvedSelection?.toUpperCase()}</h2>
-              <p style={{ fontStyle: "italic", fontSize: "12px", color: "#858279", margin: "2px 0 8px" }}>You selected: &ldquo;{popup.context.originalSelection}&rdquo;</p>
-            </>
-          ) : (
-            <h2>{popup.context.selectedText}</h2>
-          )}
-          <div className="popup-label">CONTEXT</div>
-          <p>{popup.context.context || popup.context.sentence}</p>
-          <button type="button" className="explain-button" onClick={() => void explain()}>
-            {popup.context.selectionType === "partial-word"
-              ? `Explain "${popup.context.resolvedSelection}"`
-              : popup.context.selectionType === "passage"
-              ? "Summarize with AI"
-              : "Explain with AI"}
-          </button>
-        </>}
-        {loading && <><h2>{popup.context.selectedText}</h2><p className="analyzing">Analyzing context...</p></>}
-        {explanation && <ExplanationView explanation={explanation} />}
-        {error && <p className="pdf-error">{error}</p>}
-      </section>}
+      {popup && (
+        <section
+          className="reader-ai-popup"
+          style={{ left: popup.left, top: popup.top }}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <div className="reader-popup-header">
+            <div className="brand-label">
+              <span className="spark">✦</span>
+              <span>READER AI</span>
+            </div>
+            <button
+              type="button"
+              className="close-btn"
+              aria-label="Close"
+              onClick={() => setPopup(null)}
+            >
+              ×
+            </button>
+          </div>
+          <div className="reader-popup-body" onWheel={(e) => e.stopPropagation()}>
+            {!explanation && !loading && (
+              <>
+                {popup.context.selectionType === "partial-word" ? (
+                  <>
+                    <div className="popup-label">DID YOU MEAN?</div>
+                    <h2>{popup.context.resolvedSelection?.toUpperCase()}</h2>
+                    <p style={{ fontStyle: "italic", fontSize: "12px", color: "#858279", margin: "2px 0 8px" }}>
+                      You selected: &ldquo;{popup.context.originalSelection}&rdquo;
+                    </p>
+                  </>
+                ) : (
+                  <h2>{popup.context.selectedText}</h2>
+                )}
+                <div className="popup-label">CONTEXT</div>
+                <p>{popup.context.context || popup.context.sentence}</p>
+                <button type="button" className="explain-button" onClick={() => void explain()}>
+                  {popup.context.selectionType === "partial-word"
+                    ? `Explain "${popup.context.resolvedSelection}"`
+                    : popup.context.selectionType === "passage"
+                    ? "Summarize with AI"
+                    : "Explain with AI"}
+                </button>
+              </>
+            )}
+            {loading && (
+              <>
+                <h2>{popup.context.selectedText}</h2>
+                <p className="analyzing">Analyzing context with Gemini...</p>
+              </>
+            )}
+            {explanation && <ExplanationView explanation={explanation} />}
+            {error && <p className="pdf-error">{error}</p>}
+          </div>
+        </section>
+      )}
     </main>
   );
 }
 
-function createTextLines(items: TextItemModel[]): string[] {
-  const lines: Array<{ top: number; text: string }> = [];
-  for (const item of items) {
-    const line = lines.find((candidate) => Math.abs(candidate.top - item.top) < item.height * 0.6);
-    if (line) line.text = `${line.text} ${item.text}`;
-    else lines.push({ top: item.top, text: item.text });
+function computePopupPosition(rect: DOMRect, estimatedHeight = 240, popupWidth = 320): { left: number; top: number; maxHeight: number } {
+  const gutter = 12;
+  const gap = 8;
+  const viewportW = window.innerWidth;
+  const viewportH = window.innerHeight;
+
+  // Center horizontally relative to selection
+  const center = rect.left + rect.width / 2;
+  const targetLeft = center - popupWidth / 2;
+  const maxLeft = Math.max(gutter, viewportW - popupWidth - gutter);
+  const left = Math.max(gutter, Math.min(targetLeft, maxLeft));
+
+  // Vertical placement
+  const roomBelow = viewportH - rect.bottom - gutter - gap;
+  const roomAbove = rect.top - gutter - gap;
+  const maxAllowedHeight = Math.min(viewportH * 0.7, 580);
+
+  let top: number;
+  let maxHeight: number;
+
+  if (roomBelow >= Math.min(estimatedHeight, maxAllowedHeight) || roomBelow >= roomAbove) {
+    // Place below
+    top = rect.bottom + gap;
+    maxHeight = Math.min(maxAllowedHeight, roomBelow);
+  } else {
+    // Place above
+    maxHeight = Math.min(maxAllowedHeight, roomAbove);
+    top = Math.max(gutter, rect.top - maxHeight - gap);
   }
-  return lines.sort((left, right) => left.top - right.top).map((line) => healExtractedText(line.text)).filter(Boolean);
+
+  return {
+    left: Math.round(left),
+    top: Math.round(top),
+    maxHeight: Math.round(maxHeight)
+  };
+}
+
+function createTextLines(items: TextItemModel[]): string[] {
+  // Group items by line top coordinate
+  const lineGroups: Array<{ top: number; items: TextItemModel[] }> = [];
+  for (const item of items) {
+    const group = lineGroups.find((g) => Math.abs(g.top - item.top) < item.height * 0.6);
+    if (group) group.items.push(item);
+    else lineGroups.push({ top: item.top, items: [item] });
+  }
+
+  // Sort lines vertically from top to bottom
+  lineGroups.sort((a, b) => a.top - b.top);
+
+  // For each line, sort items horizontally by left position
+  const lines: string[] = [];
+  for (const group of lineGroups) {
+    group.items.sort((a, b) => a.left - b.left);
+    let lineStr = "";
+    for (let i = 0; i < group.items.length; i++) {
+      const curr = group.items[i];
+      if (i === 0) {
+        lineStr = curr.text;
+      } else {
+        const prev = group.items[i - 1];
+        const gap = curr.left - (prev.left + prev.width);
+        // Only insert a space if there is an actual horizontal gap or either item has a space
+        if (gap >= 2.5 || prev.text.endsWith(" ") || curr.text.startsWith(" ")) {
+          lineStr = `${lineStr.trimEnd()} ${curr.text.trimStart()}`;
+        } else {
+          // No gap: consecutive ligature or split word fragment (e.g. "lifest" + "yle")
+          lineStr = `${lineStr}${curr.text}`;
+        }
+      }
+    }
+    const healed = healExtractedText(lineStr);
+    if (healed) lines.push(healed);
+  }
+
+  return lines;
 }
 
 function findLocalParagraph(page: PageModel, selectedText: string): string {

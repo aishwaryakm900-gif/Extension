@@ -50,12 +50,11 @@ export function healExtractedText(value: string): string {
   // Fix common split prefixes (e.g. "inter view" -> "interview")
   text = text.replace(/\b(inter)\s+(view|views|viewed|viewing)\b/gi, "$1$2");
 
-  // Fix detached apostrophes in contractions and possessives:
-  // e.g. "Layla ’ s" -> "Layla’s", "don ' t" -> "don't", "can ’ t" -> "can’t", "I ’ m" -> "I’m"
-  text = text.replace(/([a-zA-Z0-9]+)\s*['’`´]\s*([a-zA-Z]+)/g, "$1’$2");
-
-  // Fix plural possessives: "readers ’ " -> "readers’ "
-  text = text.replace(/([a-zA-Z0-9]+s)\s*['’`´](?=\s|$|[.,;:!?])/g, "$1’");
+  // Fix detached apostrophes in contractions and possessives without changing the quote character:
+  // e.g. "Layla ’ s" -> "Layla’s", "don ' t" -> "don't"
+  text = text.replace(/([a-zA-Z0-9]+)\s+(['’`´])\s*([a-zA-Z]+)/g, "$1$2$3");
+  text = text.replace(/([a-zA-Z0-9]+)\s*(['’`´])\s+([a-zA-Z]+)/g, "$1$2$3");
+  text = text.replace(/([a-zA-Z0-9]+s)\s+(['’`´])(?=\s|$|[.,;:!?])/g, "$1$2");
 
   // Fix spaces before punctuation: "screams ," -> "screams,"
   text = text.replace(/\s+([,.:;!?])/g, "$1");
@@ -66,19 +65,44 @@ export function healExtractedText(value: string): string {
   return text.trim();
 }
 
+export function cleanSelection(value: string): string {
+  if (!value) return "";
+  let text = healExtractedText(value);
+
+  // 1. Clean leading sentence boundary bleed from adjacent spans/previous line:
+  // e.g. "s. Now that he knew..." -> "Now that he knew..."
+  // e.g. "d. The committee..." -> "The committee..."
+  // e.g. ". Now that he knew..." -> "Now that he knew..."
+  text = text.replace(/^[a-zA-Z0-9]{1,2}[.!?]\s+(?=[A-Z0-9])/g, "");
+  text = text.replace(/^[.!?]\s+(?=[A-Z0-9])/g, "");
+
+  // 2. Clean leading 1-letter boundary bleed for single words / short phrases:
+  // e.g. "t night" -> "night" (unless the word is "a" or "I")
+  text = text.replace(/^([b-hj-zB-HJ-Z])\s+([a-zA-Z]{2,}.*)$/g, "$2");
+
+  // 3. Clean trailing bleed after sentence terminators:
+  // e.g. "lifestyle. S" -> "lifestyle."
+  text = text.replace(/([.!?])\s+[a-zA-Z0-9]{1,2}$/g, "$1");
+
+  return text.trim();
+}
+
 export function normalizeSelection(value: string): string {
-  return healExtractedText(value);
+  return cleanSelection(value);
 }
 
 export function classifySelection(selectedText: string): SelectionType {
   const normalized = normalizeSelection(selectedText);
   if (!normalized) return "unknown";
 
+  const words = normalized.split(/\s+/).filter(Boolean);
   const sentenceCount = (normalized.match(/[.!?](?:\s|$)/g) ?? []).length;
-  if (sentenceCount > 1) return "passage";
-  // Complete sentence check: ends with sentence punctuation or is a capitalized complete thought > 30 chars
-  if (sentenceCount === 1 && (normalized.length > 30 || /[.!?]$/.test(normalized))) return "sentence";
-  if (/\s/.test(normalized)) return "phrase";
+  
+  if (sentenceCount > 1 || words.length > 40) return "passage";
+  if (sentenceCount === 1 || (words.length >= 6 && /^[A-Z]/.test(normalized)) || (words.length >= 8) || /[.!?]$/.test(normalized)) {
+    return "sentence";
+  }
+  if (words.length > 1) return "phrase";
   if (/^[a-zA-Z0-9'’-]+$/.test(normalized)) return "word";
   return "word";
 }
@@ -87,42 +111,94 @@ export const detectSelectionType = classifySelection;
 export const findContainingSentence = extractSentence;
 
 /**
- * Deterministically analyzes a selection to detect if the user selected a partial word.
- * For instance, selecting "ello" or "hell" from "hello" in the text.
+ * Intelligent Selection Resolution Pipeline.
+ * Resolves candidate words for partial selections using:
+ * 1. Immediate DOM boundaries (prefixAttached/suffixAttached)
+ * 2. Local surrounding line inspection (finding full words containing the fragment)
+ * 3. Strict guard against overcorrecting valid/complete words.
  */
-export function analyzeSelectionBoundaries(
+export function resolveSelectionCandidate(
   selectedText: string,
   prefixAttached: string = "",
-  suffixAttached: string = ""
-): SelectionAnalysis {
-  const original = selectedText.trim();
+  suffixAttached: string = "",
+  surroundingText: string = ""
+): SelectionAnalysis & { confidence: "high" | "medium" | "low" } {
+  const original = cleanSelection(selectedText);
+  if (!original) {
+    return {
+      originalSelection: "",
+      resolvedSelection: "",
+      selectionType: "unknown",
+      isPartial: false,
+      confidence: "low"
+    };
+  }
+
+  // If already multiple words / sentence / passage, preserve as-is
+  if (/\s/.test(original)) {
+    const selectionType = classifySelection(original);
+    return {
+      originalSelection: original,
+      resolvedSelection: original,
+      selectionType,
+      isPartial: false,
+      confidence: "high"
+    };
+  }
+
+  // Check 1: Direct DOM boundaries (prefixAttached + original + suffixAttached)
   const cleanPrefix = prefixAttached.replace(/^.*[\s.,;:!?()[\]{}'’"]/, "");
   const cleanSuffix = suffixAttached.replace(/[\s.,;:!?()[\]{}'’"].*$/, "");
-
   const hasPrefix = cleanPrefix.length > 0 && /^[a-zA-Z0-9'’-]+$/.test(cleanPrefix);
   const hasSuffix = cleanSuffix.length > 0 && /^[a-zA-Z0-9'’-]+$/.test(cleanSuffix);
 
-  // Check if this is a partial-word selection
-  if ((hasPrefix || hasSuffix) && !/\s/.test(original) && /^[a-zA-Z0-9'’-]+$/.test(original)) {
-    const fullWord = healExtractedText(`${cleanPrefix}${original}${cleanSuffix}`);
+  if ((hasPrefix || hasSuffix) && /^[a-zA-Z0-9'’-]+$/.test(original)) {
+    const fullWord = cleanSelection(`${cleanPrefix}${original}${cleanSuffix}`);
     if (fullWord.toLowerCase() !== original.toLowerCase() && fullWord.length > original.length) {
       return {
         originalSelection: original,
         resolvedSelection: fullWord,
         selectionType: "partial-word",
-        isPartial: true
+        isPartial: true,
+        confidence: "high"
       };
     }
   }
 
+  // Check 2: Immediate surrounding line/sentence lookup for partial words (e.g. "congratulat" -> "congratulations", "mela" -> "melancholy")
+  if (surroundingText && original.length >= 3 && /^[a-zA-Z0-9'’-]+$/.test(original)) {
+    const words = surroundingText.match(/[a-zA-Z0-9'’-]+/g) || [];
+    const lowerOrig = original.toLowerCase();
+
+    // Look for a word in the immediate context that extends this selection
+    const match = words.find((w) => {
+      const lowerW = w.toLowerCase();
+      return lowerW !== lowerOrig && (lowerW.startsWith(lowerOrig) || lowerW.endsWith(lowerOrig) || (lowerOrig.length >= 4 && lowerW.includes(lowerOrig)));
+    });
+
+    if (match && match.length > original.length) {
+      return {
+        originalSelection: original,
+        resolvedSelection: match,
+        selectionType: "partial-word",
+        isPartial: true,
+        confidence: "high"
+      };
+    }
+  }
+
+  // Default: Keep original (DO NOT overcorrect valid words like "melancholy", "poignant", "night")
   const selectionType = classifySelection(original);
   return {
     originalSelection: original,
     resolvedSelection: original,
     selectionType,
-    isPartial: false
+    isPartial: false,
+    confidence: "high"
   };
 }
+
+export const analyzeSelectionBoundaries = resolveSelectionCandidate;
 
 /**
  * Extracts ONLY the sentence containing the selected text.
@@ -144,11 +220,13 @@ export function extractSentence(text: string, selectedText: string): string {
   const after = normalized.slice(selectedIndex + selected.length);
 
   // Search backwards for a sentence terminator (. ! ?)
-  const previousStop = before.search(/[.!?](?:\s|$)[^.!?]*$/);
+  const previousStop = before.search(/[.!?](?:\s+|$)[^.!?]*$/);
   let sentenceStart = 0;
 
   if (previousStop >= 0) {
-    sentenceStart = previousStop + 2;
+    const afterPunctuation = before.slice(previousStop + 1);
+    const leadingWhitespace = afterPunctuation.match(/^\s+/);
+    sentenceStart = previousStop + 1 + (leadingWhitespace ? leadingWhitespace[0].length : 0);
   } else {
     // No previous sentence terminator found.
     // DO NOT take everything from index 0 of a giant document/page!
@@ -215,8 +293,8 @@ export function buildReadingContext(input: {
   pageNumber?: number;
 }): ReadingContext {
   const rawSelection = input.selectedText || input.originalSelection || "";
-  const originalSelection = healExtractedText(rawSelection).slice(0, MAX_SELECTION_LENGTH);
-  const resolvedSelection = input.resolvedSelection ? healExtractedText(input.resolvedSelection) : originalSelection;
+  const originalSelection = cleanSelection(rawSelection).slice(0, MAX_SELECTION_LENGTH);
+  const resolvedSelection = input.resolvedSelection ? cleanSelection(input.resolvedSelection) : originalSelection;
   const selectionType = input.selectionType ?? classifySelection(resolvedSelection || originalSelection);
 
   // Local text to extract sentence from (prefer immediate paragraph/line over entire page)
