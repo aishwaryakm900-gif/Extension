@@ -1,0 +1,8 @@
+node_modules
+.next
+out
+extension/dist
+public/pdf.worker.min.mjs
+*.tsbuildinfo
+.env*.local
+npm-debug.log*

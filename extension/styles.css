@@ -1,0 +1,9 @@
+* { box-sizing: border-box; }
+body { margin: 0; width: 260px; background: #f7f6f2; color: #20201e; font-family: Arial, sans-serif; }
+.popup-shell { padding: 20px; }
+.brand { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700; letter-spacing: .16em; }
+.brand span { font-size: 16px; }
+p { margin: 24px 0; color: #686761; font-family: Georgia, serif; font-size: 15px; line-height: 1.5; }
+#open-pdf { width: 100%; padding: 10px 12px; border: 0; border-radius: 6px; background: #20201e; color: #fff; cursor: pointer; font-size: 12px; font-weight: 700; }
+.status { border-top: 1px solid #deddd6; padding-top: 12px; color: #686761; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+.status span { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: #16803c; }
