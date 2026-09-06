@@ -15,6 +15,8 @@ type PageModel = {
   lines: string[];
   items: TextItemModel[];
   imageData: string;
+  textContentSource: ConstructorParameters<typeof pdfjsLib.TextLayer>[0]["textContentSource"];
+  viewport: ConstructorParameters<typeof pdfjsLib.TextLayer>[0]["viewport"];
 };
 
 type TextItemModel = {
@@ -98,7 +100,9 @@ export default function PdfReader() {
           text: lines.join(" "),
           lines,
           items,
-          imageData: canvas.toDataURL("image/png")
+          imageData: canvas.toDataURL("image/png"),
+          textContentSource: textContent,
+          viewport
         });
       }
       setPages(loadedPages);
@@ -115,8 +119,25 @@ export default function PdfReader() {
   function handleSelection(page: PageModel, event: React.MouseEvent<HTMLElement>) {
     window.setTimeout(() => {
       const selection = window.getSelection();
-      const rawSelected = selection?.toString() ?? "";
-      if (!selection || selection.rangeCount === 0 || !rawSelected.trim()) return;
+      if (!selection || selection.rangeCount === 0) return;
+
+      const rawBrowserSelection = selection.toString();
+      const normalizedSelection = rawBrowserSelection.trim().replace(/\s+/g, " ");
+
+      console.log("RAW BROWSER SELECTION:", rawBrowserSelection);
+      console.log("START CONTAINER:", selection.anchorNode);
+      console.log("START OFFSET:", selection.anchorOffset);
+      console.log("END CONTAINER:", selection.focusNode);
+      console.log("END OFFSET:", selection.focusOffset);
+      console.log(
+        "RANGE TEXT:",
+        selection.rangeCount
+          ? selection.getRangeAt(0).toString()
+          : ""
+      );
+      console.log("NORMALIZED SELECTION:", normalizedSelection);
+
+      if (!normalizedSelection) return;
 
       const range = selection.getRangeAt(0);
       const rect = range.getBoundingClientRect();
@@ -134,11 +155,9 @@ export default function PdfReader() {
         if (match) suffixAttached = match[0];
       }
 
-      const cleanedQuery = cleanSelection(rawSelected).toLowerCase();
-      const surroundingLine = page.lines.find((l) => l.toLowerCase().includes(cleanedQuery)) ||
-        page.lines.find((l) => l.toLowerCase().includes(rawSelected.toLowerCase().trim())) ||
-        findLocalParagraph(page, rawSelected);
-      const analysis = resolveSelectionCandidate(rawSelected, prefixAttached, suffixAttached, surroundingLine);
+      const surroundingLine = page.lines.find((l) => l.toLowerCase().includes(normalizedSelection.toLowerCase())) ||
+        findLocalParagraph(page, normalizedSelection);
+      const analysis = resolveSelectionCandidate(normalizedSelection, prefixAttached, suffixAttached, surroundingLine);
 
       if (analysis.selectionType === "unknown" || (!analysis.resolvedSelection && !analysis.originalSelection)) {
         return;
@@ -228,10 +247,7 @@ export default function PdfReader() {
         {pages.length === 0 ? (
           <div className="pdf-empty-state"><span className="empty-mark">✦</span><h1>Bring a book into focus.</h1><p>{status}</p><button type="button" className="open-pdf-button large" onClick={() => inputRef.current?.click()}>Open PDF</button>{error && <p className="pdf-error">{error}</p>}</div>
         ) : pages.map((page) => (
-          <article key={page.pageNumber} className="pdf-page" data-page-number={page.pageNumber} style={{ width: page.width, height: page.height }} onMouseUp={(event) => handleSelection(page, event)}>
-            <img className="pdf-page-image" src={page.imageData} alt={`Page ${page.pageNumber}`} />
-            <div className="pdf-text-layer">{page.items.map((item, index) => <span key={`${page.pageNumber}-${index}`} style={{ left: item.left, top: item.top, width: item.width, height: item.height, fontSize: item.height }}>{item.text}</span>)}</div>
-          </article>
+          <PdfPageView key={page.pageNumber} page={page} onSelection={handleSelection} />
         ))}
       </section>
 
@@ -443,5 +459,49 @@ function ExplanationView({ explanation }: { explanation: Explanation }) {
         </>
       )}
     </div>
+  );
+}
+
+function PdfPageView({
+  page,
+  onSelection
+}: {
+  page: PageModel;
+  onSelection: (page: PageModel, event: React.MouseEvent<HTMLElement>) => void;
+}) {
+  const textLayerRef = useRef<HTMLDivElement>(null);
+  const renderedRef = useRef(false);
+
+  useEffect(() => {
+    if (!textLayerRef.current || !page.textContentSource || !page.viewport || renderedRef.current) return;
+    renderedRef.current = true;
+    textLayerRef.current.replaceChildren();
+    textLayerRef.current.style.setProperty("--total-scale-factor", String(page.viewport.scale));
+    try {
+      const textLayerObj = new pdfjsLib.TextLayer({
+        textContentSource: page.textContentSource,
+        container: textLayerRef.current,
+        viewport: page.viewport
+      });
+      void textLayerObj.render();
+    } catch (e) {
+      console.error("TextLayer render failed", e);
+    }
+  }, [page]);
+
+  return (
+    <article
+      className="pdf-page"
+      data-page-number={page.pageNumber}
+      style={{ width: page.width, height: page.height }}
+      onMouseUp={(event) => onSelection(page, event)}
+    >
+      <img className="pdf-page-image" src={page.imageData} alt={`Page ${page.pageNumber}`} />
+      <div
+        ref={textLayerRef}
+        className="textLayer"
+        style={{ width: page.width, height: page.height }}
+      />
+    </article>
   );
 }

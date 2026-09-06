@@ -42,22 +42,35 @@ async function renderPage(documentProxy: pdfjsLib.PDFDocumentProxy, pageNumber: 
   canvas.height = viewport.height;
   wrapper.appendChild(canvas);
   const textLayer = document.createElement("div");
-  textLayer.className = "text-layer";
+  textLayer.className = "textLayer";
+  textLayer.style.width = `${viewport.width}px`;
+  textLayer.style.height = `${viewport.height}px`;
+  textLayer.style.setProperty("--total-scale-factor", String(scale));
   wrapper.appendChild(textLayer);
   viewer?.appendChild(wrapper);
 
   await page.render({ canvasContext: canvas.getContext("2d")!, viewport }).promise;
   const content = await page.getTextContent();
-  for (const item of content.items) {
-    if (!("str" in item) || !item.str) continue;
-    const span = document.createElement("span");
-    span.textContent = item.str;
-    const transform = pdfjsLib.Util.transform(viewport.transform, item.transform);
-    span.style.left = `${transform[4]}px`;
-    span.style.top = `${transform[5] - item.height * scale}px`;
-    span.style.fontSize = `${item.height * scale}px`;
-    span.style.fontFamily = item.fontName ?? "sans-serif";
-    textLayer.appendChild(span);
+  try {
+    const textLayerObj = new pdfjsLib.TextLayer({
+      textContentSource: content,
+      container: textLayer,
+      viewport
+    });
+    await textLayerObj.render();
+  } catch (e) {
+    console.error("Extension TextLayer render failed, using fallback spans", e);
+    for (const item of content.items) {
+      if (!("str" in item) || !item.str) continue;
+      const span = document.createElement("span");
+      span.textContent = item.str;
+      const transform = pdfjsLib.Util.transform(viewport.transform, item.transform);
+      span.style.left = `${transform[4]}px`;
+      span.style.top = `${transform[5] - item.height * scale}px`;
+      span.style.fontSize = `${item.height * scale}px`;
+      span.style.fontFamily = item.fontName ?? "sans-serif";
+      textLayer.appendChild(span);
+    }
   }
 }
 
@@ -153,7 +166,7 @@ function resolveSelectionCandidate(
   suffixAttached: string = "",
   surroundingText: string = ""
 ): { originalSelection: string; resolvedSelection: string; selectionType: PdfSelectionData["selectionType"] } {
-  const original = (selectedText ?? "").trim();
+  const original = (selectedText ?? "").trim().replace(/\s+/g, " ");
   if (!original) {
     return { originalSelection: "", resolvedSelection: "", selectionType: "unknown" };
   }
@@ -179,12 +192,13 @@ function resolveSelectionCandidate(
     return { originalSelection: original, resolvedSelection: original, selectionType: "unknown" };
   }
 
+
   const cleaned = cleanSelection(original);
   if (!cleaned || !/[a-zA-Z0-9]/.test(cleaned)) {
     return { originalSelection: original, resolvedSelection: original, selectionType: "unknown" };
   }
 
-  // 3. Complete Sentence / Passage Check
+  // 4. Complete Sentence / Passage Check
   const sentenceCount = (cleaned.match(/[.!?](?:\s|$)/g) ?? []).length;
   const words = cleaned.split(/\s+/).filter(Boolean);
   if (sentenceCount > 1 || words.length > 40) {
@@ -194,19 +208,59 @@ function resolveSelectionCandidate(
     return { originalSelection: original, resolvedSelection: cleaned, selectionType: "sentence" };
   }
 
-  // 4. Multi-word Phrase Check
-  if (words.length > 1 && !/^[+*\/=<>~`|^&%$@!?:;,\s]+/.test(original)) {
+  const cleanPrefix = prefixAttached.replace(/^.*[\s.,;:!?()[\]{}'’"]/, "");
+  const cleanSuffix = suffixAttached.replace(/[\s.,;:!?()[\]{}'’"].*$/, "");
+  const hasPrefix = cleanPrefix.length > 0 && /^[a-zA-Z0-9'’+#.-]+$/.test(cleanPrefix);
+  const hasSuffix = cleanSuffix.length > 0 && /^[a-zA-Z0-9'’+#.-]+$/.test(cleanSuffix);
+
+  // 5. Corrupted boundary slice detection (e.g. "ient registr" cutting across "patient registration")
+  if (words.length > 1 && (hasPrefix || hasSuffix)) {
+    const lastWord = words[words.length - 1];
+    if (hasSuffix && /^[a-zA-Z0-9'’+#.-]+$/.test(lastWord)) {
+      const fullWord = cleanSelection(`${lastWord}${cleanSuffix}`);
+      if (fullWord.length > lastWord.length && isMeaningfulWord(fullWord)) {
+        return { originalSelection: original, resolvedSelection: fullWord, selectionType: "partial-word" };
+      }
+    }
+  }
+
+  if (words.length > 1 && surroundingText) {
+    const tokens = extractTokensFromText(surroundingText);
+    const firstWordExact = tokens.some((t) => t.toLowerCase() === words[0].toLowerCase());
+    const lastWordExact = tokens.some((t) => t.toLowerCase() === words[words.length - 1].toLowerCase());
+
+    if (!firstWordExact || !lastWordExact) {
+      let bestToken = "";
+      let bestOverlap = 0;
+      for (const token of tokens) {
+        for (const w of words) {
+          const lowerW = w.toLowerCase();
+          const lowerT = token.toLowerCase();
+          if (lowerT.startsWith(lowerW) || lowerT.endsWith(lowerW) || (lowerW.length >= 4 && lowerT.includes(lowerW))) {
+            if (lowerW.length > bestOverlap) {
+              bestOverlap = lowerW.length;
+              bestToken = token;
+            }
+          }
+        }
+      }
+      if (bestToken && bestOverlap >= 3) {
+        return { originalSelection: original, resolvedSelection: bestToken, selectionType: "partial-word" };
+      }
+    }
+  }
+
+  // 6. Valid Multi-Word Phrase Check
+  if (words.length > 1 && !/^[+*\/=<>~`|^&%$@!?:;,\s]+/.test(original) && !hasPrefix && !hasSuffix) {
     if (words.every((w) => isMeaningfulWord(w))) {
       return { originalSelection: original, resolvedSelection: cleaned, selectionType: "phrase" };
     }
   }
 
-  // 5. Word / Fragment Recovery (e.g. "++, JavaS" -> "JavaS" -> "JavaScript")
+  // 7. Word / Fragment Target Determination
   const targetFragment = words.length === 1 ? words[0] : cleaned;
 
-  const cleanPrefix = prefixAttached.replace(/^.*[\s.,;:!?()[\]{}'’"]/, "");
-  const cleanSuffix = suffixAttached.replace(/[\s.,;:!?()[\]{}'’"].*$/, "");
-  if ((cleanPrefix || cleanSuffix) && /^[a-zA-Z0-9'’+#.-]+$/.test(targetFragment)) {
+  if ((hasPrefix || hasSuffix) && /^[a-zA-Z0-9'’+#.-]+$/.test(targetFragment)) {
     const fullWord = cleanSelection(`${cleanPrefix}${targetFragment}${cleanSuffix}`);
     if (fullWord.toLowerCase() !== targetFragment.toLowerCase() && fullWord.length > targetFragment.length) {
       return { originalSelection: original, resolvedSelection: fullWord, selectionType: "partial-word" };
@@ -245,9 +299,25 @@ function resolveSelectionCandidate(
 
 function handleSelection(): void {
   const selection = window.getSelection();
-  const rawSelected = selection?.toString() ?? "";
-  const trimmedRaw = (rawSelected ?? "").trim();
-  if (!selection || selection.rangeCount === 0 || !trimmedRaw) return;
+  if (!selection || selection.rangeCount === 0) return;
+
+  const rawBrowserSelection = selection.toString();
+  const normalizedSelection = rawBrowserSelection.trim().replace(/\s+/g, " ");
+
+  console.log("RAW BROWSER SELECTION:", rawBrowserSelection);
+  console.log("START CONTAINER:", selection.anchorNode);
+  console.log("START OFFSET:", selection.anchorOffset);
+  console.log("END CONTAINER:", selection.focusNode);
+  console.log("END OFFSET:", selection.focusOffset);
+  console.log(
+    "RANGE TEXT:",
+    selection.rangeCount
+      ? selection.getRangeAt(0).toString()
+      : ""
+  );
+  console.log("NORMALIZED SELECTION:", normalizedSelection);
+
+  if (!normalizedSelection) return;
 
   const range = selection.getRangeAt(0);
   const page = (range.commonAncestorContainer.parentElement ?? range.commonAncestorContainer as Element).closest<HTMLElement>(".page");
@@ -269,13 +339,13 @@ function handleSelection(): void {
     if (match) suffixAttached = match[0];
   }
 
-  const localText = extractLocalPdfText(page, range, trimmedRaw);
-  const candidate = resolveSelectionCandidate(trimmedRaw, prefixAttached, suffixAttached, localText);
+  const localText = extractLocalPdfText(page, range, normalizedSelection);
+  const candidate = resolveSelectionCandidate(normalizedSelection, prefixAttached, suffixAttached, localText);
 
   // Reject purely invalid selections (like isolated punctuation with no meaning)
   if (candidate.selectionType === "unknown" || !candidate.resolvedSelection) return;
 
-  const sentence = extractSentence(localText, candidate.resolvedSelection || trimmedRaw);
+  const sentence = extractSentence(localText, candidate.resolvedSelection || normalizedSelection);
 
   showPopup({
     originalSelection: candidate.originalSelection,
@@ -290,7 +360,7 @@ function handleSelection(): void {
 }
 
 function extractLocalPdfText(page: HTMLElement, range: Range, selectedText: string): string {
-  const textLayer = page.querySelector<HTMLElement>(".text-layer");
+  const textLayer = page.querySelector<HTMLElement>(".textLayer, .text-layer");
   if (!textLayer) return selectedText;
 
   const selRect = range.getBoundingClientRect();

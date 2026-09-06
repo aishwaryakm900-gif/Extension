@@ -137,6 +137,57 @@ function runTests() {
     JSON.stringify(tPhrase)
   );
 
+  // === NEW TESTS FOR PATIENT REGISTRATION REQUIREMENT ===
+  const patientContext = "Developed ABHA+, an AI-powered multilingual healthcare platform with voice-assisted patient registration, AI-powered OPD token generation, and intelligent healthcare workflows.";
+
+  // PATIENT REG TEST 1: Select only 'registration' -> returns exact 'registration'
+  const pr1 = resolveSelectionCandidate("registration", "", "", patientContext);
+  assert(
+    pr1.originalSelection === "registration" && pr1.resolvedSelection === "registration" && pr1.selectionType === "word",
+    "PATIENT REG TEST 1: Select 'registration' -> exact 'registration', NOT 'ient registr'",
+    JSON.stringify(pr1)
+  );
+
+  // PATIENT REG TEST 2: Select 'patient' -> returns 'patient'
+  const pr2 = resolveSelectionCandidate("patient", "", "", patientContext);
+  assert(
+    pr2.originalSelection === "patient" && pr2.resolvedSelection === "patient" && pr2.selectionType === "word",
+    "PATIENT REG TEST 2: Select 'patient' -> exact 'patient'",
+    JSON.stringify(pr2)
+  );
+
+  // PATIENT REG TEST 3: Select 'patient registration' -> exact 'patient registration'
+  const pr3 = resolveSelectionCandidate("patient registration", "", "", patientContext);
+  assert(
+    pr3.originalSelection === "patient registration" && pr3.resolvedSelection === "patient registration" && pr3.selectionType === "phrase",
+    "PATIENT REG TEST 3: Select 'patient registration' -> exact 'patient registration'",
+    JSON.stringify(pr3)
+  );
+
+  // PATIENT REG TEST 4: Select complete sentence containing registration
+  const pr4 = resolveSelectionCandidate(patientContext, "", "", patientContext);
+  assert(
+    pr4.resolvedSelection === patientContext && pr4.selectionType === "sentence",
+    "PATIENT REG TEST 4: Select complete sentence containing registration -> exact sentence",
+    JSON.stringify(pr4)
+  );
+
+  // PATIENT REG TEST 5: Partial word 'registr' -> recovers 'registration'
+  const pr5 = resolveSelectionCandidate("registr", "", "", patientContext);
+  assert(
+    pr5.originalSelection === "registr" && pr5.resolvedSelection === "registration" && pr5.selectionType === "partial-word",
+    "PATIENT REG TEST 5: Select partial word 'registr' -> recovers 'registration'",
+    JSON.stringify(pr5)
+  );
+
+  // PATIENT REG TEST 6: Corrupted boundary slice 'ient registr' -> recovers 'registration'
+  const pr6 = resolveSelectionCandidate("ient registr", "pat", "ation", patientContext);
+  assert(
+    pr6.originalSelection === "ient registr" && pr6.resolvedSelection === "registration" && pr6.selectionType === "partial-word",
+    "PATIENT REG TEST 6: Corrupted 'ient registr' -> recovers 'registration' without sending 'ient registr'",
+    JSON.stringify(pr6)
+  );
+
   console.log(`\nResults: ${passed}/${total} passed.`);
   if (passed !== total) process.exit(1);
 }

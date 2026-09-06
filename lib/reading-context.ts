@@ -271,13 +271,14 @@ export function resolveSelectionCandidate(
     };
   }
 
-  // 3. Clean leading/trailing boundary bleed and punctuation
+
+  // 4. Clean leading/trailing boundary bleed and punctuation
   // e.g. "++, JavaS" -> "JavaS"
   // e.g. ", Python" -> "Python"
   // e.g. "s. Now that he knew..." -> "Now that he knew..."
   const cleaned = cleanSelection(original);
 
-  // 4. Complete Sentence / Passage Check
+  // 5. Complete Sentence / Passage Check
   const sentenceCount = (cleaned.match(/[.!?](?:\s|$)/g) ?? []).length;
   const words = cleaned.split(/\s+/).filter(Boolean);
   if (sentenceCount > 1 || words.length > 40) {
@@ -299,9 +300,68 @@ export function resolveSelectionCandidate(
     };
   }
 
-  // 5. Valid Multi-Word Phrase Check
-  // Only treated as a phrase if it doesn't start with random punctuation bleed (like "++, ")
-  if (words.length > 1 && !/^[+*\/=<>~`|^&%$@!?:;,\s]+/.test(original)) {
+  // Check DOM boundaries for attached prefix/suffix (e.g. "ello" with prefix "h" -> "hello")
+  const cleanPrefix = prefixAttached.replace(/^.*[\s.,;:!?()[\]{}'’"]/, "");
+  const cleanSuffix = suffixAttached.replace(/[\s.,;:!?()[\]{}'’"].*$/, "");
+  const hasPrefix = cleanPrefix.length > 0 && /^[a-zA-Z0-9'’+#.-]+$/.test(cleanPrefix);
+  const hasSuffix = cleanSuffix.length > 0 && /^[a-zA-Z0-9'’+#.-]+$/.test(cleanSuffix);
+
+  // 6. Corrupted boundary slice detection (e.g. "ient registr" cutting across "patient registration")
+  // If the selection has attached prefix/suffix or contains broken fragments, recover intended word
+  if (words.length > 1 && (hasPrefix || hasSuffix)) {
+    const lastWord = words[words.length - 1];
+    if (hasSuffix && /^[a-zA-Z0-9'’+#.-]+$/.test(lastWord)) {
+      const fullWord = cleanSelection(`${lastWord}${cleanSuffix}`);
+      if (fullWord.length > lastWord.length && isMeaningfulWord(fullWord)) {
+        return {
+          originalSelection: original,
+          resolvedSelection: fullWord,
+          selectionType: "partial-word",
+          isPartial: true,
+          confidence: "high"
+        };
+      }
+    }
+  }
+
+  // If multi-word selection has surrounding text, check if it's actually an adjacent fragment pair like "ient registr"
+  if (words.length > 1 && surroundingText) {
+    const tokens = extractTokensFromText(surroundingText);
+    // If neither the first nor the last word is an exact full token in surroundingText, it's a corrupted slice!
+    const firstWordExact = tokens.some((t) => t.toLowerCase() === words[0].toLowerCase());
+    const lastWordExact = tokens.some((t) => t.toLowerCase() === words[words.length - 1].toLowerCase());
+
+    if (!firstWordExact || !lastWordExact) {
+      // Find the token in surroundingText with highest character overlap with any word in the slice
+      let bestToken = "";
+      let bestOverlap = 0;
+      for (const token of tokens) {
+        for (const w of words) {
+          const lowerW = w.toLowerCase();
+          const lowerT = token.toLowerCase();
+          if (lowerT.startsWith(lowerW) || lowerT.endsWith(lowerW) || (lowerW.length >= 4 && lowerT.includes(lowerW))) {
+            if (lowerW.length > bestOverlap) {
+              bestOverlap = lowerW.length;
+              bestToken = token;
+            }
+          }
+        }
+      }
+      if (bestToken && bestOverlap >= 3) {
+        return {
+          originalSelection: original,
+          resolvedSelection: bestToken,
+          selectionType: "partial-word",
+          isPartial: true,
+          confidence: "high"
+        };
+      }
+    }
+  }
+
+  // 7. Valid Multi-Word Phrase Check (e.g. "hit the roof", "patient registration")
+  // Only treated as a phrase if not starting with symbol bleed and not cut at word boundaries
+  if (words.length > 1 && !/^[+*\/=<>~`|^&%$@!?:;,\s]+/.test(original) && !hasPrefix && !hasSuffix) {
     const allWordsValid = words.every((w) => isMeaningfulWord(w));
     if (allWordsValid) {
       return {
@@ -314,15 +374,8 @@ export function resolveSelectionCandidate(
     }
   }
 
-  // 6. Word / Fragment Target Determination:
-  // If cleaned is a single word or extracted from corrupted selection (e.g. "++, JavaS" -> "JavaS")
+  // 8. Word / Fragment Target Determination:
   const targetFragment = words.length === 1 ? words[0] : cleaned;
-
-  // Check DOM boundaries for attached prefix/suffix (e.g. "ello" with prefix "h" -> "hello")
-  const cleanPrefix = prefixAttached.replace(/^.*[\s.,;:!?()[\]{}'’"]/, "");
-  const cleanSuffix = suffixAttached.replace(/[\s.,;:!?()[\]{}'’"].*$/, "");
-  const hasPrefix = cleanPrefix.length > 0 && /^[a-zA-Z0-9'’+#.-]+$/.test(cleanPrefix);
-  const hasSuffix = cleanSuffix.length > 0 && /^[a-zA-Z0-9'’+#.-]+$/.test(cleanSuffix);
 
   if ((hasPrefix || hasSuffix) && /^[a-zA-Z0-9'’+#.-]+$/.test(targetFragment)) {
     const fullWord = cleanSelection(`${cleanPrefix}${targetFragment}${cleanSuffix}`);
@@ -338,7 +391,7 @@ export function resolveSelectionCandidate(
   }
 
   // Check immediate surrounding line/context for complete token matching targetFragment
-  // (e.g. "JavaS" -> "JavaScript", "congratulat" -> "congratulations", "mela" -> "melancholy")
+  // (e.g. "JavaS" -> "JavaScript", "congratulat" -> "congratulations", "registr" -> "registration")
   if (surroundingText && targetFragment.length >= 2) {
     const tokens = extractTokensFromText(surroundingText);
     const lowerTarget = targetFragment.toLowerCase();

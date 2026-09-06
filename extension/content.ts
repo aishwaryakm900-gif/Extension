@@ -368,12 +368,13 @@ function analyzeSelection(selection: Selection, range: Range, surroundingText: s
     return { originalSelection: original, resolvedSelection: original, selectionType: "unknown" };
   }
 
+
   const cleaned = cleanSelection(original);
   if (!cleaned || !/[a-zA-Z0-9]/.test(cleaned)) {
     return { originalSelection: original, resolvedSelection: original, selectionType: "unknown" };
   }
 
-  // Sentence / Passage Check
+  // 4. Complete Sentence / Passage Check
   const sentenceCount = (cleaned.match(/[.!?](?:\s|$)/g) ?? []).length;
   const words = cleaned.split(/\s+/).filter(Boolean);
   if (sentenceCount > 1 || words.length > 40) {
@@ -382,16 +383,6 @@ function analyzeSelection(selection: Selection, range: Range, surroundingText: s
   if (sentenceCount === 1 || (words.length >= 6 && /^[A-Z]/.test(cleaned)) || words.length >= 8 || /[.!?]$/.test(cleaned)) {
     return { originalSelection: original, resolvedSelection: cleaned, selectionType: "sentence" };
   }
-
-  // Multi-word Phrase Check
-  if (words.length > 1 && !/^[+*\/=<>~`|^&%$@!?:;,\s]+/.test(original)) {
-    if (words.every((w) => isMeaningfulWord(w))) {
-      return { originalSelection: original, resolvedSelection: cleaned, selectionType: "phrase" };
-    }
-  }
-
-  // Word / Fragment Recovery (e.g. "++, JavaS" -> "JavaS" -> "JavaScript")
-  const targetFragment = words.length === 1 ? words[0] : cleaned;
 
   let prefixAttached = "";
   let suffixAttached = "";
@@ -408,6 +399,54 @@ function analyzeSelection(selection: Selection, range: Range, surroundingText: s
 
   const cleanPrefix = prefixAttached.replace(/^.*[\s.,;:!?()[\]{}'’"]/, "");
   const cleanSuffix = suffixAttached.replace(/[\s.,;:!?()[\]{}'’"].*$/, "");
+
+  // 5. Corrupted boundary slice detection (e.g. "ient registr" cutting across "patient registration")
+  if (words.length > 1 && (cleanPrefix || cleanSuffix)) {
+    const lastWord = words[words.length - 1];
+    if (cleanSuffix && /^[a-zA-Z0-9'’+#.-]+$/.test(lastWord)) {
+      const fullWord = cleanSelection(`${lastWord}${cleanSuffix}`);
+      if (fullWord.length > lastWord.length && isMeaningfulWord(fullWord)) {
+        return { originalSelection: original, resolvedSelection: fullWord, selectionType: "partial-word" };
+      }
+    }
+  }
+
+  if (words.length > 1 && surroundingText) {
+    const tokens = extractTokensFromText(surroundingText);
+    const firstWordExact = tokens.some((t) => t.toLowerCase() === words[0].toLowerCase());
+    const lastWordExact = tokens.some((t) => t.toLowerCase() === words[words.length - 1].toLowerCase());
+
+    if (!firstWordExact || !lastWordExact) {
+      let bestToken = "";
+      let bestOverlap = 0;
+      for (const token of tokens) {
+        for (const w of words) {
+          const lowerW = w.toLowerCase();
+          const lowerT = token.toLowerCase();
+          if (lowerT.startsWith(lowerW) || lowerT.endsWith(lowerW) || (lowerW.length >= 4 && lowerT.includes(lowerW))) {
+            if (lowerW.length > bestOverlap) {
+              bestOverlap = lowerW.length;
+              bestToken = token;
+            }
+          }
+        }
+      }
+      if (bestToken && bestOverlap >= 3) {
+        return { originalSelection: original, resolvedSelection: bestToken, selectionType: "partial-word" };
+      }
+    }
+  }
+
+  // 6. Multi-word Phrase Check
+  if (words.length > 1 && !/^[+*\/=<>~`|^&%$@!?:;,\s]+/.test(original) && !cleanPrefix && !cleanSuffix) {
+    if (words.every((w) => isMeaningfulWord(w))) {
+      return { originalSelection: original, resolvedSelection: cleaned, selectionType: "phrase" };
+    }
+  }
+
+  // 7. Word / Fragment Target Determination
+  const targetFragment = words.length === 1 ? words[0] : cleaned;
+
   if ((cleanPrefix || cleanSuffix) && /^[a-zA-Z0-9'’+#.-]+$/.test(targetFragment)) {
     const fullWord = cleanSelection(`${cleanPrefix}${targetFragment}${cleanSuffix}`);
     if (fullWord.toLowerCase() !== targetFragment.toLowerCase() && fullWord.length > targetFragment.length) {
