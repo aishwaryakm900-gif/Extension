@@ -6,3 +6,7 @@ public/pdf.worker.min.mjs
 *.tsbuildinfo
 .env*.local
 npm-debug.log*
+next-build.log
+*.log
+scratch/
+
