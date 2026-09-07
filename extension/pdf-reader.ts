@@ -5,6 +5,11 @@ const title = document.querySelector<HTMLElement>("#document-title");
 const params = new URLSearchParams(window.location.search);
 const sourceUrl = params.get("url");
 let popup: HTMLElement | null = null;
+let interactingWithPopup = false;
+const POPUP_WIDTH = 320;
+const VIEWPORT_MARGIN = 16;
+const SELECTION_GAP = 8;
+const MAX_POPUP_HEIGHT = 650;
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "pdf.worker.js";
 
@@ -76,7 +81,20 @@ async function renderPage(documentProxy: pdfjsLib.PDFDocumentProxy, pageNumber: 
 
 document.addEventListener("mouseup", () => window.setTimeout(handleSelection, 0));
 
+document.addEventListener("pointerdown", (event) => {
+  if (popup && !popup.contains(event.target as Node)) {
+    interactingWithPopup = false;
+  }
+}, true);
+
+document.addEventListener("mousedown", (event) => {
+  if (popup && !popup.contains(event.target as Node)) {
+    interactingWithPopup = false;
+  }
+}, true);
+
 document.addEventListener("selectionchange", () => window.setTimeout(() => {
+  if (interactingWithPopup) return;
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed) removePopup();
 }, 0));
@@ -437,7 +455,32 @@ function showPopup(data: PdfSelectionData): void {
 
   const body = document.createElement("div");
   body.className = "popup-body";
-  body.addEventListener("wheel", (e) => e.stopPropagation());
+
+  popup.addEventListener("pointerdown", (e) => {
+    e.stopPropagation();
+    interactingWithPopup = true;
+  });
+  popup.addEventListener("mousedown", (e) => {
+    e.stopPropagation();
+    interactingWithPopup = true;
+  });
+  popup.addEventListener("click", (e) => {
+    e.stopPropagation();
+    interactingWithPopup = true;
+  });
+  popup.addEventListener("wheel", (e: WheelEvent) => {
+    e.stopPropagation();
+    if (e.target !== body && !body.contains(e.target as Node)) {
+      body.scrollTop += e.deltaY;
+    }
+  }, { passive: true });
+  popup.addEventListener("touchstart", (e) => {
+    e.stopPropagation();
+    interactingWithPopup = true;
+  }, { passive: true });
+  popup.addEventListener("touchmove", (e) => {
+    e.stopPropagation();
+  }, { passive: true });
 
   if (data.selectionType === "partial-word") {
     body.innerHTML = `
@@ -519,7 +562,11 @@ function formatResult(result: Record<string, unknown>): string {
   return `${explanation}${points}`.trim();
 }
 
-function removePopup(): void { popup?.remove(); popup = null; }
+function removePopup(): void {
+  popup?.remove();
+  popup = null;
+  interactingWithPopup = false;
+}
 
 function healText(value: string): string {
   return value
@@ -585,30 +632,64 @@ function extractSentence(text: string, selected: string): string {
 }
 
 function positionPopup(element: HTMLElement, rect: DOMRect): void {
-  const box = element.getBoundingClientRect();
-  const width = box.width || 320;
-  const height = box.height || 220;
-  const gutter = 12;
-  const gap = 8;
+  // Allow measuring unconstrained natural content height up to MAX_POPUP_HEIGHT
+  element.style.maxHeight = `${MAX_POPUP_HEIGHT}px`;
 
+  const box = element.getBoundingClientRect();
+  const width = box.width || POPUP_WIDTH;
+  const naturalHeight = element.scrollHeight || box.height || 200;
+
+  // Horizontal positioning: center relative to selection, clamped within safe margins
   const center = rect.left + rect.width / 2;
   const targetLeft = center - width / 2;
-  const maxLeft = Math.max(gutter, window.innerWidth - width - gutter);
-  const left = Math.max(gutter, Math.min(targetLeft, maxLeft));
+  const maxLeft = Math.max(VIEWPORT_MARGIN, window.innerWidth - width - VIEWPORT_MARGIN);
+  const left = Math.max(VIEWPORT_MARGIN, Math.min(targetLeft, maxLeft));
 
-  const roomBelow = window.innerHeight - rect.bottom;
-  const roomAbove = rect.top;
-  const neededHeight = height + gap + gutter;
+  // Vertical available spaces:
+  const spaceBelow = window.innerHeight - rect.bottom - SELECTION_GAP - VIEWPORT_MARGIN;
+  const spaceAbove = rect.top - SELECTION_GAP - VIEWPORT_MARGIN;
 
-  let top: number;
-  if (roomBelow >= neededHeight || roomBelow >= roomAbove) {
-    top = rect.bottom + gap;
+  let placeBelow: boolean;
+  let availableSpace: number;
+
+  if (spaceBelow >= naturalHeight) {
+    // 1. Enough room below for full natural content
+    placeBelow = true;
+    availableSpace = spaceBelow;
+  } else if (spaceAbove >= naturalHeight) {
+    // 2. Not enough room below, but enough room above for full natural content
+    placeBelow = false;
+    availableSpace = spaceAbove;
   } else {
-    top = rect.top - height - gap;
+    // 3. Neither side fits completely -> choose the side with more available space
+    if (spaceBelow >= spaceAbove) {
+      placeBelow = true;
+      availableSpace = spaceBelow;
+    } else {
+      placeBelow = false;
+      availableSpace = spaceAbove;
+    }
   }
 
-  const maxTop = Math.max(gutter, window.innerHeight - height - gutter);
-  const clampedTop = Math.max(gutter, Math.min(top, maxTop));
+  // Constrain max-height strictly based on the available space on the chosen side
+  const calculatedMaxHeight = Math.max(120, Math.min(availableSpace, MAX_POPUP_HEIGHT));
+  element.style.maxHeight = `${Math.floor(calculatedMaxHeight)}px`;
+
+  // Calculate top coordinate based on placement direction
+  let top: number;
+  if (placeBelow) {
+    top = rect.bottom + SELECTION_GAP;
+  } else {
+    const currentHeight = element.getBoundingClientRect().height;
+    top = rect.top - SELECTION_GAP - currentHeight;
+  }
+
+  // Ensure popup is strictly within viewport bounds [VIEWPORT_MARGIN, window.innerHeight - currentHeight - VIEWPORT_MARGIN]
+  const currentHeight = element.getBoundingClientRect().height;
+  const clampedTop = Math.max(
+    VIEWPORT_MARGIN,
+    Math.min(top, Math.max(VIEWPORT_MARGIN, window.innerHeight - currentHeight - VIEWPORT_MARGIN))
+  );
 
   element.style.left = `${Math.round(left)}px`;
   element.style.top = `${Math.round(clampedTop)}px`;

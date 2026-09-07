@@ -1,5 +1,20 @@
 * { box-sizing: border-box; }
-body { margin: 0; width: 260px; background: #f7f6f2; color: #20201e; font-family: Arial, sans-serif; }
+body {
+  margin: 0;
+  width: 260px;
+  max-height: 520px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: #f7f6f2;
+  color: #20201e;
+  font-family: Arial, sans-serif;
+  scrollbar-width: thin;
+  scrollbar-color: #d8d6ce transparent;
+}
+body::-webkit-scrollbar { width: 6px; }
+body::-webkit-scrollbar-track { background: transparent; }
+body::-webkit-scrollbar-thumb { background-color: #d8d6ce; border-radius: 3px; }
+body::-webkit-scrollbar-thumb:hover { background-color: #bfbcb2; }
 .popup-shell { padding: 20px; }
 .brand { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700; letter-spacing: .16em; }
 .brand span { font-size: 16px; }

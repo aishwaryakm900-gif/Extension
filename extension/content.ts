@@ -1,6 +1,8 @@
 const HOST_ID = "reader-ai-selection-host";
 const POPUP_WIDTH = 320;
-const VIEWPORT_GUTTER = 12;
+const VIEWPORT_MARGIN = 16;
+const SELECTION_GAP = 8;
+const MAX_POPUP_HEIGHT = 650;
 
 let popupHost: HTMLDivElement | null = null;
 let popupRoot: ShadowRoot | null = null;
@@ -592,42 +594,76 @@ function isExplanation(value: unknown): value is Explanation {
 }
 
 function positionPopup(popup: HTMLElement, selectionRect: DOMRect): void {
+  // Allow measuring unconstrained natural content height up to MAX_POPUP_HEIGHT
+  popup.style.maxHeight = `${MAX_POPUP_HEIGHT}px`;
+
   const renderedRect = popup.getBoundingClientRect();
   const width = renderedRect.width || POPUP_WIDTH;
-  const height = renderedRect.height || 200;
+  const naturalHeight = popup.scrollHeight || renderedRect.height || 200;
 
-  // 1. Center horizontally relative to the selection rectangle
+  // Horizontal positioning: center relative to selection, clamped within safe margins
   const selectionCenter = selectionRect.left + selectionRect.width / 2;
   const targetLeft = selectionCenter - width / 2;
+  const maxLeft = Math.max(VIEWPORT_MARGIN, window.innerWidth - width - VIEWPORT_MARGIN);
+  const popupLeft = Math.max(VIEWPORT_MARGIN, Math.min(targetLeft, maxLeft));
 
-  // Clamp horizontally within the viewport edges
-  const maxLeft = Math.max(VIEWPORT_GUTTER, window.innerWidth - width - VIEWPORT_GUTTER);
-  const popupLeft = Math.max(VIEWPORT_GUTTER, Math.min(targetLeft, maxLeft));
+  // Vertical available spaces:
+  const spaceBelow = window.innerHeight - selectionRect.bottom - SELECTION_GAP - VIEWPORT_MARGIN;
+  const spaceAbove = selectionRect.top - SELECTION_GAP - VIEWPORT_MARGIN;
 
-  // 2. Prefer below the selection, place above if insufficient space
-  const roomBelow = window.innerHeight - selectionRect.bottom;
-  const roomAbove = selectionRect.top;
-  const gap = 8;
-  const neededHeight = height + gap + VIEWPORT_GUTTER;
+  let placeBelow: boolean;
+  let availableSpace: number;
 
-  let chosenTop: number;
-  if (roomBelow >= neededHeight || roomBelow >= roomAbove) {
-    // Sufficient room below or more room below than above
-    chosenTop = selectionRect.bottom + gap;
+  if (spaceBelow >= naturalHeight) {
+    // 1. Enough room below for full natural content
+    placeBelow = true;
+    availableSpace = spaceBelow;
+  } else if (spaceAbove >= naturalHeight) {
+    // 2. Not enough room below, but enough room above for full natural content
+    placeBelow = false;
+    availableSpace = spaceAbove;
   } else {
-    // Flip above
-    chosenTop = selectionRect.top - height - gap;
+    // 3. Neither side fits completely -> choose the side with more available space
+    if (spaceBelow >= spaceAbove) {
+      placeBelow = true;
+      availableSpace = spaceBelow;
+    } else {
+      placeBelow = false;
+      availableSpace = spaceAbove;
+    }
   }
 
-  // Clamp vertically within the viewport edges (never outside viewport)
-  const maxTop = Math.max(VIEWPORT_GUTTER, window.innerHeight - height - VIEWPORT_GUTTER);
-  const popupTop = Math.max(VIEWPORT_GUTTER, Math.min(chosenTop, maxTop));
+  // Constrain max-height strictly based on the available space on the chosen side
+  const calculatedMaxHeight = Math.max(120, Math.min(availableSpace, MAX_POPUP_HEIGHT));
+  popup.style.maxHeight = `${Math.floor(calculatedMaxHeight)}px`;
+
+  // Calculate top coordinate based on placement direction
+  let popupTop: number;
+  if (placeBelow) {
+    popupTop = selectionRect.bottom + SELECTION_GAP;
+  } else {
+    const currentHeight = popup.getBoundingClientRect().height;
+    popupTop = selectionRect.top - SELECTION_GAP - currentHeight;
+  }
+
+  // Ensure popup is strictly within viewport bounds [VIEWPORT_MARGIN, window.innerHeight - currentHeight - VIEWPORT_MARGIN]
+  const currentHeight = popup.getBoundingClientRect().height;
+  const clampedTop = Math.max(
+    VIEWPORT_MARGIN,
+    Math.min(popupTop, Math.max(VIEWPORT_MARGIN, window.innerHeight - currentHeight - VIEWPORT_MARGIN))
+  );
 
   popup.style.left = `${Math.round(popupLeft)}px`;
-  popup.style.top = `${Math.round(popupTop)}px`;
+  popup.style.top = `${Math.round(clampedTop)}px`;
 }
 
-function updateActivePosition(): void {
+function updateActivePosition(event?: Event): void {
+  if (event && popupHost) {
+    const target = event.target as Node | null;
+    if (target && (target === popupHost || popupHost.contains(target) || popupRoot?.contains(target))) {
+      return;
+    }
+  }
   if (!popupHost || !activeRange || !activePopupElement) return;
 
   const rect = activeRange.getBoundingClientRect();
@@ -710,8 +746,8 @@ function renderPopup(data: SelectionData, range: Range): void {
     :host { all: initial; }
     .popup {
       position: fixed;
-      width: min(${POPUP_WIDTH}px, calc(100vw - ${VIEWPORT_GUTTER * 2}px));
-      max-height: min(70vh, 520px);
+      width: min(${POPUP_WIDTH}px, calc(100vw - ${VIEWPORT_MARGIN * 2}px));
+      max-height: min(80vh, ${MAX_POPUP_HEIGHT}px);
       display: flex;
       flex-direction: column;
       box-sizing: border-box;
@@ -726,7 +762,7 @@ function renderPopup(data: SelectionData, range: Range): void {
       overscroll-behavior: contain;
     }
     .header {
-      flex: 0 0 auto;
+      flex-shrink: 0;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -757,9 +793,26 @@ function renderPopup(data: SelectionData, range: Range): void {
     .close:hover { background: #eeece5; color: #20201e; }
     .body {
       flex: 1 1 auto;
+      min-height: 0;
       overflow-y: auto;
+      overflow-x: hidden;
       overscroll-behavior: contain;
       padding: 14px 16px 16px;
+      scrollbar-width: thin;
+      scrollbar-color: #d8d6ce transparent;
+    }
+    .body::-webkit-scrollbar {
+      width: 6px;
+    }
+    .body::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .body::-webkit-scrollbar-thumb {
+      background-color: #d8d6ce;
+      border-radius: 3px;
+    }
+    .body::-webkit-scrollbar-thumb:hover {
+      background-color: #bfbcb2;
     }
     .selection {
       font-family: Georgia, serif;
@@ -777,10 +830,7 @@ function renderPopup(data: SelectionData, range: Range): void {
       font-family: Georgia, serif;
       font-size: 13px;
       line-height: 1.45;
-      display: -webkit-box;
-      -webkit-line-clamp: 4;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
+      overflow-wrap: anywhere;
     }
     .copy, .example { margin-top: 6px; color: #5d5b55; font-family: Georgia, serif; font-size: 13px; line-height: 1.45; }
     .example { font-style: italic; }
@@ -812,20 +862,6 @@ function renderPopup(data: SelectionData, range: Range): void {
   popup.setAttribute("role", "dialog");
   popup.setAttribute("aria-label", "Reader AI context");
 
-  // Prevent clicks inside the popup from bubbling to page or collapsing popup
-  popup.addEventListener("pointerdown", (e) => {
-    e.stopPropagation();
-    interactingWithPopup = true;
-  });
-  popup.addEventListener("mousedown", (e) => {
-    e.stopPropagation();
-    interactingWithPopup = true;
-  });
-  popup.addEventListener("click", (e) => {
-    e.stopPropagation();
-    interactingWithPopup = true;
-  });
-
   const header = document.createElement("header");
   header.className = "header";
   const brand = document.createElement("div");
@@ -848,6 +884,33 @@ function renderPopup(data: SelectionData, range: Range): void {
 
   const body = document.createElement("div");
   body.className = "body";
+
+  // Prevent clicks and scroll gestures inside the popup from bubbling to page or collapsing popup
+  popup.addEventListener("pointerdown", (e) => {
+    e.stopPropagation();
+    interactingWithPopup = true;
+  });
+  popup.addEventListener("mousedown", (e) => {
+    e.stopPropagation();
+    interactingWithPopup = true;
+  });
+  popup.addEventListener("click", (e) => {
+    e.stopPropagation();
+    interactingWithPopup = true;
+  });
+  popup.addEventListener("wheel", (e: WheelEvent) => {
+    e.stopPropagation();
+    if (e.target !== body && !body.contains(e.target as Node)) {
+      body.scrollTop += e.deltaY;
+    }
+  }, { passive: true });
+  popup.addEventListener("touchstart", (e) => {
+    e.stopPropagation();
+    interactingWithPopup = true;
+  }, { passive: true });
+  popup.addEventListener("touchmove", (e) => {
+    e.stopPropagation();
+  }, { passive: true });
 
   if (data.selectionType === "partial-word") {
     addText(body, "DID YOU MEAN?", "label");
