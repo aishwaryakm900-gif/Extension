@@ -10,5 +10,5 @@
     "outDir": "extension/dist",
     "noEmitOnError": true
   },
-  "include": ["extension/content.ts", "extension/background.ts", "extension/popup.ts"]
+  "include": ["extension/**/*.ts"]
 }

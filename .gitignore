@@ -9,4 +9,5 @@ npm-debug.log*
 next-build.log
 *.log
 scratch/
+.cache/
 

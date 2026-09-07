@@ -4,28 +4,87 @@ import { explanationSchema, normalizeExplanationData, type ExplainRequest, type 
 export class AIServiceError extends Error {
   public readonly code: string;
   public readonly status: number;
+  public readonly retryable: boolean;
 
-  constructor(message: string, code = "AI_SERVICE_ERROR", status = 502) {
+  constructor(message: string, code = "AI_SERVICE_ERROR", status = 502, retryable = true) {
     super(message);
     this.name = "AIServiceError";
     this.code = code;
     this.status = status;
+    this.retryable = retryable;
   }
 }
 
-function getCandidateModels(): string[] {
-  const envModel = process.env.GEMINI_MODEL || (process.env.AI_MODEL?.includes("gemini") ? process.env.AI_MODEL : undefined);
-  const models = [
-    envModel,
-    "gemini-flash-latest",
-    "gemini-3.1-flash-lite",
-    "gemini-3.6-flash",
+export function extractErrorStatus(err: unknown): number {
+  if (!err || typeof err !== "object") return 500;
+  const anyErr = err as Record<string, unknown>;
+  if (typeof anyErr.status === "number") return anyErr.status;
+  if (typeof anyErr.statusCode === "number") return anyErr.statusCode;
+
+  const errorProp = anyErr.error as Record<string, unknown> | undefined;
+  if (errorProp && typeof errorProp.code === "number") return errorProp.code;
+
+  const msg = anyErr.message ? String(anyErr.message) : "";
+  const match = msg.match(/\b(429|500|502|503|504)\b/);
+  if (match) return parseInt(match[1], 10);
+
+  return 500;
+}
+
+export function isTransientError(err: unknown): boolean {
+  const status = extractErrorStatus(err);
+  if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
+    return true;
+  }
+
+  const msg = err instanceof Error ? err.message : String(err);
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes("high demand") ||
+    lower.includes("spikes in demand") ||
+    lower.includes("temporarily unavailable") ||
+    lower.includes("unavailable") ||
+    lower.includes("resource_exhausted") ||
+    lower.includes("quota exceeded") ||
+    lower.includes("rate limit") ||
+    lower.includes("overloaded") ||
+    lower.includes("econnreset") ||
+    lower.includes("etimedout") ||
+    lower.includes("fetch failed") ||
+    lower.includes("network")
+  );
+}
+
+export function getCandidateModels(): string[] {
+  const primary = process.env.AI_MODEL || process.env.GEMINI_MODEL;
+  const fallback = process.env.AI_FALLBACK_MODEL || process.env.GEMINI_FALLBACK_MODEL;
+
+  // Verified currently supported Gemini models for text generation in order of preference
+  const validDefaults = [
     "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
     "gemini-3.7-flash",
     "gemini-flash-lite-latest"
-  ].filter(Boolean) as string[];
+  ];
 
-  return Array.from(new Set(models));
+  const candidateList: string[] = [];
+
+  if (primary && primary.trim().length > 0) {
+    candidateList.push(primary.trim());
+  }
+
+  if (fallback && fallback.trim().length > 0 && fallback.trim() !== primary?.trim()) {
+    candidateList.push(fallback.trim());
+  }
+
+  for (const def of validDefaults) {
+    if (!candidateList.includes(def)) {
+      candidateList.push(def);
+    }
+  }
+
+  return candidateList;
 }
 
 const SYSTEM_INSTRUCTION = `You are Reader AI, an intelligent selection-aware reading companion.
@@ -39,16 +98,23 @@ CORE PRINCIPLE:
 
 SELECTION-AWARE RULES:
 
-CASE 1 — SINGLE WORD (or PARTIAL WORD resolved to a word):
-- The user wants the meaning of this specific word.
-- "meaning": Concise, clear definition of the word.
+CASE 1 — SINGLE WORD, CAMELCASE TERM, OR TECHNICAL TERM:
+- The user wants the meaning and pronunciation of this specific word/term.
+- If the selection is CamelCase (e.g. "CloudComputing", "StateManagement"), normalize to natural space-separated words (e.g. "Cloud Computing", "State Management") in "resolvedTerm".
+- "pronunciation": Accurate IPA phonetic transcription enclosed in slashes (e.g. "/ˈstrɛtʃɪz/", "/ˈnæʃənəl/", "/klaʊd kəmˈpjuːtɪŋ/", "/ˌsiː plʌs ˈplʌs/"). NEVER simply wrap the original text with slashes (e.g. NEVER "/cloudcomputing/"). If reliable IPA cannot be determined, omit this field.
+- "phoneticGuide": Student-friendly readable pronunciation guide (e.g. "NASH-uh-nuhl", "cloud kuhm-PYOO-ting", "MAN-ij-muhnt", "SEE-plus-plus").
+- "spokenText": The exact natural words to pass to text-to-speech (e.g. "Cloud Computing", "C plus plus", "R-E-S-T A-P-I", "L-L-M").
+- "meaning": Concise, clear definition of the word/term.
 - "simpleMeaning": Everyday plain-English meaning.
-- "contextExplanation": A very short, 1-sentence note clarifying how this word is functioning in this specific sentence (e.g., if "cold" in "cold look", explain it means emotionally distant/unfriendly; if "congratulations", explain the expression of praise in this context).
-- DO NOT summarize or explain the entire sentence. Keep it focused on the word!
+- "contextExplanation": A very short, 1-sentence note clarifying how this word/term is functioning in this specific sentence.
+- DO NOT summarize or explain the entire sentence. Keep it focused on the word/term!
 - "example": Brief illustrative sentence.
 
 CASE 2 — PHRASE OR IDIOM:
-- The user wants the meaning of the phrase/idiom as a whole.
+- The user wants the meaning and pronunciation of the phrase/idiom as a whole (e.g. "machine learning", "artificial intelligence", "large language model").
+- "pronunciation": Accurate IPA for the whole phrase (e.g. "/məˈʃiːn ˈlɜːrnɪŋ/").
+- "phoneticGuide": Student-friendly readable pronunciation guide (e.g. "muh-SHEEN LURN-ing").
+- "spokenText": The natural words to speak out loud.
 - "meaning": What the phrase or idiom means.
 - "simpleExplanation": Plain-English explanation.
 - "contextExplanation": How it applies in this context.
@@ -67,11 +133,15 @@ CASE 4 — PASSAGE / MULTIPLE SENTENCES:
 OUTPUT FORMAT:
 Return ONLY a valid JSON object matching:
 
-For word:
+For word or technical term:
 {
   "type": "word",
-  "word": "<the word>",
+  "word": "<the word or term>",
+  "resolvedTerm": "<normalized term, e.g. Cloud Computing>",
   "partOfSpeech": "<part of speech>",
+  "pronunciation": "<Real IPA, e.g. /ˈstrɛtʃɪz/ or /klaʊd kəmˈpjuːtɪŋ/>",
+  "phoneticGuide": "<readable pronunciation, e.g. STRETCH-iz or cloud kuhm-PYOO-ting>",
+  "spokenText": "<spoken words for TTS, e.g. Cloud Computing>",
   "meaning": "<definition of the word>",
   "simpleMeaning": "<everyday meaning>",
   "contextExplanation": "<brief 1-sentence contextual note>",
@@ -82,6 +152,10 @@ For phrase:
 {
   "type": "phrase",
   "phrase": "<phrase>",
+  "resolvedTerm": "<phrase>",
+  "pronunciation": "<Real IPA for the whole phrase>",
+  "phoneticGuide": "<readable pronunciation for the whole phrase>",
+  "spokenText": "<spoken phrase for TTS>",
   "meaning": "<phrase meaning>",
   "simpleExplanation": "<plain-English explanation>",
   "contextExplanation": "<contextual note>"
@@ -102,7 +176,8 @@ export async function explainInContext(input: ExplainRequest): Promise<Explanati
     throw new AIServiceError(
       "GEMINI_API_KEY is not configured on the server. Please set GEMINI_API_KEY in .env.local.",
       "CONFIG_ERROR",
-      500
+      500,
+      false
     );
   }
 
@@ -118,13 +193,18 @@ export async function explainInContext(input: ExplainRequest): Promise<Explanati
   }, null, 2);
 
   let lastError: unknown = null;
-
-  // Attempt generation, with fallback across candidate models and a retry pass if transient 503/429 occurs
   const candidateModels = getCandidateModels();
-  const maxPasses = 2;
 
-  for (let pass = 1; pass <= maxPasses; pass++) {
-    for (const model of candidateModels) {
+  for (const model of candidateModels) {
+    const maxRetries = 2;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      if (attempt > 1) {
+        const backoffMs = attempt * 600; // pass 2 -> 600ms, pass 3 -> 1200ms
+        console.log(`[Reader AI Server] Waiting ${backoffMs}ms before retrying model "${model}" (attempt ${attempt})...`);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      }
+
       try {
         const response = await ai.models.generateContent({
           model,
@@ -143,8 +223,8 @@ export async function explainInContext(input: ExplainRequest): Promise<Explanati
           return explanation;
         }
 
-        // If parsing failed, retry once with a strict formatting prompt
-        console.warn(`[Reader AI] Gemini response from ${model} failed validation. Retrying with strict JSON prompt...`);
+        // If initial parsing failed, attempt one strict JSON formatting pass
+        console.warn(`[Reader AI Server] Gemini response from "${model}" failed schema validation. Attempting JSON recovery...`);
         const retryResponse = await ai.models.generateContent({
           model,
           contents: [
@@ -166,35 +246,39 @@ export async function explainInContext(input: ExplainRequest): Promise<Explanati
           return retryExplanation;
         }
 
-        throw new AIServiceError(`Gemini returned unparseable explanation format: ${rawText.slice(0, 200)}`, "PARSE_ERROR", 502);
+        throw new AIServiceError("Gemini returned invalid response format", "PARSE_ERROR", 502, true);
       } catch (err: unknown) {
         lastError = err;
+        const status = extractErrorStatus(err);
         const errorMessage = err instanceof Error ? err.message : String(err);
-        const isRetriable = errorMessage.includes("503") ||
-                            errorMessage.includes("429") ||
-                            errorMessage.includes("404") ||
-                            errorMessage.includes("demand") ||
-                            errorMessage.includes("UNAVAILABLE") ||
-                            errorMessage.includes("RESOURCE_EXHAUSTED") ||
-                            errorMessage.includes("NOT_FOUND");
+        const transient = isTransientError(err);
 
-        console.warn(`[Reader AI] Attempt with model ${model} (pass ${pass}) failed: ${errorMessage}`);
-        if (!isRetriable) {
-          break; // Don't try other models if it's an invalid key or client error
+        console.warn(`[Reader AI Server] Model "${model}" attempt ${attempt} failed [status: ${status}]: ${errorMessage}`);
+
+        // If it is an unrecoverable auth error (invalid API key), stop retrying immediately
+        if (status === 401 || status === 403 || errorMessage.toLowerCase().includes("api key not valid")) {
+          throw new AIServiceError("Invalid API key or unauthorized access.", "AUTH_ERROR", 401, false);
         }
-        await new Promise((resolve) => setTimeout(resolve, 400));
-      }
-    }
 
-    if (pass < maxPasses) {
-      console.log("[Reader AI] Waiting 1.5s before retry pass for high demand spike...");
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+        // If 503 high demand or 404 model not found, switch immediately to fallback model
+        if (status === 503 || status === 404 || errorMessage.toLowerCase().includes("high demand") || errorMessage.toLowerCase().includes("not found")) {
+          console.log(`[Reader AI Server] Model "${model}" is unavailable or experiencing high demand. Switching to next candidate model...`);
+          break; // Break retry loop on this model, proceed to next candidate model
+        }
+
+        if (!transient && attempt >= maxRetries) {
+          break;
+        }
+      }
     }
   }
 
-  console.error("[Reader AI Server] All Gemini explanation attempts failed:", lastError);
-  const detail = lastError instanceof Error ? lastError.message : "Upstream AI provider failed.";
-  throw new AIServiceError(`AI service failure: ${detail}`, "UPSTREAM_ERROR", 502);
+  console.error("[Reader AI Server] All candidate models exhausted. Last error:", lastError);
+  const isTransient = isTransientError(lastError);
+  const status = isTransient ? 503 : 502;
+  const message = isTransient ? "AI service temporarily unavailable. Please try again." : "AI service failure. Please try again.";
+
+  throw new AIServiceError(message, isTransient ? "AI_BUSY" : "UPSTREAM_ERROR", status, isTransient);
 }
 
 function cleanJsonString(raw: string): string {

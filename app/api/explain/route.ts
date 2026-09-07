@@ -51,20 +51,23 @@ export async function POST(request: Request): Promise<Response> {
     if (error instanceof AIServiceError) {
       return Response.json(
         {
+          success: false,
           error: error.message,
-          code: error.code
+          code: error.code,
+          retryable: error.retryable
         },
         { status: error.status, headers: jsonHeaders }
       );
     }
 
-    const message = error instanceof Error ? error.message : "Internal AI processing error.";
     return Response.json(
       {
-        error: `Unable to explain this selection right now. (${message})`,
-        code: "INTERNAL_ERROR"
+        success: false,
+        error: "AI service temporarily unavailable. Please try again.",
+        code: "INTERNAL_ERROR",
+        retryable: true
       },
-      { status: 500, headers: jsonHeaders }
+      { status: 503, headers: jsonHeaders }
     );
   }
 }

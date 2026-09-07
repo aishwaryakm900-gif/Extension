@@ -3,7 +3,9 @@
   "name": "Reader AI",
   "version": "0.1.0",
   "description": "Understand unfamiliar language in the context where you found it.",
-  "permissions": [],
+  "permissions": [
+    "tts"
+  ],
   "host_permissions": ["http://*/*", "https://*/*", "file:///*"],
   "background": {
     "service_worker": "dist/background.js",

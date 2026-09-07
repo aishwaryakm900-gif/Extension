@@ -90,6 +90,30 @@ export function isTechnicalToken(word: string): boolean {
 }
 
 /**
+ * Checks whether a word has plausible English phonotactic structure.
+ * Rejects random corrupted letter sequences without vowels or with illegal clusters (e.g. "xyzq", "bcdf").
+ */
+export function isPhonotacticallyPlausible(word: string): boolean {
+  if (!word) return false;
+  const lower = word.toLowerCase().trim();
+  if (isTechnicalToken(lower)) return true;
+
+  // Single letters: only 'a', 'i'
+  if (lower.length === 1) return lower === "a" || lower === "i";
+
+  // Must have at least one vowel (a, e, i, o, u, y)
+  if (!/[aeiouy]/.test(lower)) return false;
+
+  // Implausible English clusters
+  if (/zq|qj|qk|qx|qz|jx|xj|vf|vj|vk|vx|vz|zf|zj|zk|zx/.test(lower)) return false;
+  if (/q(?!u)/.test(lower) && lower !== "faq") return false;
+  if (/^[^aeiouy]{4,}/.test(lower) && !/^(?:str|spl|scr|spr|schw|phth)/.test(lower)) return false;
+  if (/[^aeiouy]{5,}/.test(lower) && !/(?:lengths|strengths|angst)/.test(lower)) return false;
+
+  return true;
+}
+
+/**
  * Determines whether a given string represents a meaningful, searchable word or technical token.
  */
 export function isMeaningfulWord(word: string): boolean {
@@ -106,6 +130,11 @@ export function isMeaningfulWord(word: string): boolean {
   // Single letters other than 'a', 'A', 'I'
   if (/^[a-zA-Z]$/.test(trimmed)) {
     return trimmed === "a" || trimmed === "A" || trimmed === "I";
+  }
+
+  // Must be phonotactically plausible English word or technical term
+  if (!isPhonotacticallyPlausible(trimmed)) {
+    return false;
   }
 
   // Natural words with apostrophes or hyphens:
@@ -197,6 +226,124 @@ export function classifySelection(selectedText: string): SelectionType {
 export const detectSelectionType = classifySelection;
 export const findContainingSentence = extractSentence;
 
+export type DomSelectionDetails = {
+  rawSelection: string;
+  prefixAttached: string;
+  suffixAttached: string;
+  surroundingLine: string;
+  enclosingWord?: string;
+};
+
+/**
+ * Extracts DOM Selection details from a DOM Range.
+ * Uses exact DOM node traversal to identify physically attached prefixes/suffixes
+ * across split spans in modern PDF.js textLayers or complex web formatting.
+ */
+export function extractDomSelectionDetails(range: Range, containerElement?: HTMLElement | null): DomSelectionDetails {
+  const rawSelection = range.toString().trim();
+  let prefixAttached = "";
+  let suffixAttached = "";
+
+  if (range.startContainer.nodeType === Node.TEXT_NODE) {
+    const textNode = range.startContainer as Text;
+    const fullText = textNode.textContent || "";
+    const sliceBefore = fullText.slice(0, range.startOffset);
+    const match = sliceBefore.match(/[a-zA-Z0-9'’+#.-]+$/);
+    if (match) {
+      prefixAttached = match[0];
+    }
+
+    // If sliceBefore had no whitespace and there is a preceding sibling span without whitespace
+    if (!/\s/.test(sliceBefore)) {
+      let curr = textNode.parentElement?.previousElementSibling as HTMLElement | null;
+      while (curr && !curr.classList.contains("reader-ai-popup") && !curr.classList.contains("popup")) {
+        const text = curr.textContent || "";
+        if (!text) break;
+        const trailing = text.match(/[a-zA-Z0-9'’+#.-]+$/);
+        if (trailing) {
+          prefixAttached = trailing[0] + prefixAttached;
+        }
+        if (/\s/.test(text) || !trailing) {
+          break;
+        }
+        curr = curr.previousElementSibling as HTMLElement | null;
+      }
+    }
+  }
+
+  if (range.endContainer.nodeType === Node.TEXT_NODE) {
+    const textNode = range.endContainer as Text;
+    const fullText = textNode.textContent || "";
+    const sliceAfter = fullText.slice(range.endOffset);
+    const match = sliceAfter.match(/^[a-zA-Z0-9'’+#.-]+/);
+    if (match) {
+      suffixAttached = match[0];
+    }
+
+    // If sliceAfter had no whitespace and there is a subsequent sibling span without whitespace
+    if (!/\s/.test(sliceAfter)) {
+      let curr = textNode.parentElement?.nextElementSibling as HTMLElement | null;
+      while (curr && !curr.classList.contains("reader-ai-popup") && !curr.classList.contains("popup")) {
+        const text = curr.textContent || "";
+        if (!text) break;
+        const leading = text.match(/^[a-zA-Z0-9'’+#.-]+/);
+        if (leading) {
+          suffixAttached = suffixAttached + leading[0];
+        }
+        if (/\s/.test(text) || !leading) {
+          break;
+        }
+        curr = curr.nextElementSibling as HTMLElement | null;
+      }
+    }
+  }
+
+  let surroundingLine = "";
+  try {
+    const rect = range.getBoundingClientRect();
+    const searchRoot =
+      containerElement ||
+      (range.startContainer.parentElement?.closest(".textLayer, .page, article, p, [role='region']") as HTMLElement | null) ||
+      (typeof document !== "undefined" ? document.body : null);
+
+    if (searchRoot && rect.width > 0 && typeof searchRoot.querySelectorAll === "function") {
+      const spans = Array.from(searchRoot.querySelectorAll<HTMLElement>("span"));
+      if (spans.length > 0) {
+        const selCenterY = rect.top + rect.height / 2;
+        const sameLineSpans = spans.filter((s) => {
+          const sRect = s.getBoundingClientRect();
+          if (sRect.width === 0 || sRect.height === 0) return false;
+          const sCenterY = sRect.top + sRect.height / 2;
+          return Math.abs(sCenterY - selCenterY) < 18;
+        });
+
+        if (sameLineSpans.length > 0) {
+          sameLineSpans.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+          surroundingLine = sameLineSpans.map((s) => s.textContent || "").join(" ").replace(/\s+/g, " ").trim();
+        }
+      }
+    }
+  } catch {
+    // ignore geometry errors
+  }
+
+  if (!surroundingLine && range.startContainer.parentElement) {
+    surroundingLine = (range.startContainer.parentElement.textContent || rawSelection).replace(/\s+/g, " ").trim();
+  }
+
+  const enclosingWord = (prefixAttached || suffixAttached)
+    ? cleanSelection(`${prefixAttached}${rawSelection}${suffixAttached}`)
+    : undefined;
+
+  return {
+    rawSelection,
+    prefixAttached,
+    suffixAttached,
+    surroundingLine,
+    enclosingWord
+  };
+}
+
 /**
  * Intelligent Selection Resolution Pipeline.
  * Resolves candidate words for partial selections using:
@@ -271,11 +418,7 @@ export function resolveSelectionCandidate(
     };
   }
 
-
   // 4. Clean leading/trailing boundary bleed and punctuation
-  // e.g. "++, JavaS" -> "JavaS"
-  // e.g. ", Python" -> "Python"
-  // e.g. "s. Now that he knew..." -> "Now that he knew..."
   const cleaned = cleanSelection(original);
 
   // 5. Complete Sentence / Passage Check
@@ -307,7 +450,6 @@ export function resolveSelectionCandidate(
   const hasSuffix = cleanSuffix.length > 0 && /^[a-zA-Z0-9'’+#.-]+$/.test(cleanSuffix);
 
   // 6. Corrupted boundary slice detection (e.g. "ient registr" cutting across "patient registration")
-  // If the selection has attached prefix/suffix or contains broken fragments, recover intended word
   if (words.length > 1 && (hasPrefix || hasSuffix)) {
     const lastWord = words[words.length - 1];
     if (hasSuffix && /^[a-zA-Z0-9'’+#.-]+$/.test(lastWord)) {
@@ -324,15 +466,12 @@ export function resolveSelectionCandidate(
     }
   }
 
-  // If multi-word selection has surrounding text, check if it's actually an adjacent fragment pair like "ient registr"
   if (words.length > 1 && surroundingText) {
     const tokens = extractTokensFromText(surroundingText);
-    // If neither the first nor the last word is an exact full token in surroundingText, it's a corrupted slice!
     const firstWordExact = tokens.some((t) => t.toLowerCase() === words[0].toLowerCase());
     const lastWordExact = tokens.some((t) => t.toLowerCase() === words[words.length - 1].toLowerCase());
 
     if (!firstWordExact || !lastWordExact) {
-      // Find the token in surroundingText with highest character overlap with any word in the slice
       let bestToken = "";
       let bestOverlap = 0;
       for (const token of tokens) {
@@ -347,7 +486,7 @@ export function resolveSelectionCandidate(
           }
         }
       }
-      if (bestToken && bestOverlap >= 3) {
+      if (bestToken && bestOverlap >= 3 && isMeaningfulWord(bestToken)) {
         return {
           originalSelection: original,
           resolvedSelection: bestToken,
@@ -359,8 +498,7 @@ export function resolveSelectionCandidate(
     }
   }
 
-  // 7. Valid Multi-Word Phrase Check (e.g. "hit the roof", "patient registration")
-  // Only treated as a phrase if not starting with symbol bleed and not cut at word boundaries
+  // 7. Valid Multi-Word Phrase Check (e.g. "machine learning", "artificial intelligence")
   if (words.length > 1 && !/^[+*\/=<>~`|^&%$@!?:;,\s]+/.test(original) && !hasPrefix && !hasSuffix) {
     const allWordsValid = words.every((w) => isMeaningfulWord(w));
     if (allWordsValid) {
@@ -377,9 +515,10 @@ export function resolveSelectionCandidate(
   // 8. Word / Fragment Target Determination:
   const targetFragment = words.length === 1 ? words[0] : cleaned;
 
+  // Immediate attached boundary reconstruction (e.g. "ello" + "h" = "hello", "registr" + "ation" = "registration")
   if ((hasPrefix || hasSuffix) && /^[a-zA-Z0-9'’+#.-]+$/.test(targetFragment)) {
     const fullWord = cleanSelection(`${cleanPrefix}${targetFragment}${cleanSuffix}`);
-    if (fullWord.toLowerCase() !== targetFragment.toLowerCase() && fullWord.length > targetFragment.length) {
+    if (fullWord.toLowerCase() !== targetFragment.toLowerCase() && fullWord.length > targetFragment.length && isMeaningfulWord(fullWord)) {
       return {
         originalSelection: original,
         resolvedSelection: fullWord,
@@ -391,12 +530,11 @@ export function resolveSelectionCandidate(
   }
 
   // Check immediate surrounding line/context for complete token matching targetFragment
-  // (e.g. "JavaS" -> "JavaScript", "congratulat" -> "congratulations", "registr" -> "registration")
   if (surroundingText && targetFragment.length >= 2) {
     const tokens = extractTokensFromText(surroundingText);
     const lowerTarget = targetFragment.toLowerCase();
 
-    // Look for exact token first (if already a full valid token like "Python", "melancholy", "C++")
+    // Look for exact token first
     const exactMatch = tokens.find((t) => t.toLowerCase() === lowerTarget);
     if (exactMatch && isMeaningfulWord(exactMatch) && !/^[+*\/=<>~`|^&%$@!?:;,\s]+/.test(original)) {
       return {
@@ -408,17 +546,17 @@ export function resolveSelectionCandidate(
       };
     }
 
-    // Look for token that starts with, ends with, or extends targetFragment
+    // Look for token that starts with, ends with, or contains targetFragment
     const candidate = tokens.find((t) => {
       const lowerT = t.toLowerCase();
       return lowerT !== lowerTarget && (
         lowerT.startsWith(lowerTarget) ||
         lowerT.endsWith(lowerTarget) ||
-        (lowerTarget.length >= 4 && lowerT.includes(lowerTarget))
+        (lowerTarget.length >= 3 && lowerT.includes(lowerTarget))
       );
     });
 
-    if (candidate && candidate.length > targetFragment.length) {
+    if (candidate && candidate.length > targetFragment.length && isMeaningfulWord(candidate)) {
       return {
         originalSelection: original,
         resolvedSelection: candidate,
@@ -429,7 +567,7 @@ export function resolveSelectionCandidate(
     }
   }
 
-  // If already a valid complete word (e.g. "Python", "melancholy", "poignant", "night", "C++")
+  // If already a valid complete word
   if (isMeaningfulWord(cleaned)) {
     return {
       originalSelection: original,
@@ -440,13 +578,13 @@ export function resolveSelectionCandidate(
     };
   }
 
-  // Fallback: Return cleaned selection
+  // Fallback: If not a meaningful word and couldn't be resolved, return unknown with low confidence
   return {
     originalSelection: original,
     resolvedSelection: cleaned,
-    selectionType: classifySelection(cleaned),
+    selectionType: "unknown",
     isPartial: false,
-    confidence: "medium"
+    confidence: "low"
   };
 }
 

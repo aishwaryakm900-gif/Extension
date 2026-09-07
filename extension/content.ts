@@ -1,3 +1,12 @@
+import {
+  resolvePronunciation,
+  isCamelCase,
+  splitCamelCase,
+  isEligibleForPronunciation,
+  normalizeSpokenText,
+  isValidIpa
+} from "./pronunciation";
+
 const HOST_ID = "reader-ai-selection-host";
 const POPUP_WIDTH = 320;
 const VIEWPORT_MARGIN = 16;
@@ -28,6 +37,7 @@ type Explanation = {
   type: "word" | "phrase" | "explanation";
   word?: string;
   partOfSpeech?: string;
+  pronunciation?: string;
   meaning?: string;
   simpleMeaning?: string;
   contextExplanation?: string;
@@ -261,6 +271,19 @@ function isTechnicalToken(word: string): boolean {
   return false;
 }
 
+function isPhonotacticallyPlausible(word: string): boolean {
+  if (!word) return false;
+  const lower = word.toLowerCase().trim();
+  if (isTechnicalToken(lower)) return true;
+  if (lower.length === 1) return lower === "a" || lower === "i";
+  if (!/[aeiouy]/.test(lower)) return false;
+  if (/zq|qj|qk|qx|qz|jx|xj|vf|vj|vk|vx|vz|zf|zj|zk|zx/.test(lower)) return false;
+  if (/q(?!u)/.test(lower) && lower !== "faq") return false;
+  if (/^[^aeiouy]{4,}/.test(lower) && !/^(?:str|spl|scr|spr|schw|phth)/.test(lower)) return false;
+  if (/[^aeiouy]{5,}/.test(lower) && !/(?:lengths|strengths|angst)/.test(lower)) return false;
+  return true;
+}
+
 function isMeaningfulWord(word: string): boolean {
   if (!word) return false;
   const trimmed = word.trim();
@@ -268,6 +291,7 @@ function isMeaningfulWord(word: string): boolean {
   if (isTechnicalToken(trimmed)) return true;
   if (/^[^\w\s]+$/.test(trimmed)) return false;
   if (/^[a-zA-Z]$/.test(trimmed)) return trimmed === "a" || trimmed === "A" || trimmed === "I";
+  if (!isPhonotacticallyPlausible(trimmed)) return false;
   if (/^[a-zA-Z]+([’'-][a-zA-Z]+)*$/.test(trimmed)) return true;
   if (/^[a-zA-Z0-9]+([’'-][a-zA-Z0-9]+)*$/.test(trimmed) && /[a-zA-Z]/.test(trimmed)) return true;
   return false;
@@ -331,11 +355,104 @@ function isReaderAiNativePage(): boolean {
   return false;
 }
 
+function extractDomSelectionDetails(range: Range, rootContainer?: HTMLElement | null): {
+  rawSelection: string;
+  prefixAttached: string;
+  suffixAttached: string;
+  surroundingLine: string;
+} {
+  const rawSelection = range.toString();
+  let prefixAttached = "";
+  let suffixAttached = "";
+  let surroundingLine = "";
+
+  try {
+    if (range.startContainer.nodeType === Node.TEXT_NODE) {
+      const textBefore = (range.startContainer.textContent || "").slice(0, range.startOffset);
+      const match = textBefore.match(/[a-zA-Z0-9'’+#.-]+$/);
+      if (match) prefixAttached = match[0];
+    }
+
+    if (!prefixAttached) {
+      let node: Node | null = range.startContainer;
+      let prevText = "";
+      while (node && !prevText) {
+        if (node.previousSibling) {
+          node = node.previousSibling;
+          prevText = node.textContent || "";
+        } else {
+          node = node.parentNode;
+          if (node === rootContainer || (node && node.nodeType === Node.ELEMENT_NODE && (node as HTMLElement).id === HOST_ID)) {
+            break;
+          }
+        }
+      }
+      if (prevText) {
+        const match = prevText.match(/[a-zA-Z0-9'’+#.-]+$/);
+        if (match) prefixAttached = match[0];
+      }
+    }
+
+    if (range.endContainer.nodeType === Node.TEXT_NODE) {
+      const textAfter = (range.endContainer.textContent || "").slice(range.endOffset);
+      const match = textAfter.match(/^[a-zA-Z0-9'’+#.-]+/);
+      if (match) suffixAttached = match[0];
+    }
+
+    if (!suffixAttached) {
+      let node: Node | null = range.endContainer;
+      let nextText = "";
+      while (node && !nextText) {
+        if (node.nextSibling) {
+          node = node.nextSibling;
+          nextText = node.textContent || "";
+        } else {
+          node = node.parentNode;
+          if (node === rootContainer || (node && node.nodeType === Node.ELEMENT_NODE && (node as HTMLElement).id === HOST_ID)) {
+            break;
+          }
+        }
+      }
+      if (nextText) {
+        const match = nextText.match(/^[a-zA-Z0-9'’+#.-]+/);
+        if (match) suffixAttached = match[0];
+      }
+    }
+
+    if (rootContainer) {
+      const selRect = range.getBoundingClientRect();
+      const allSpans = Array.from(rootContainer.querySelectorAll<HTMLElement>("span, p, div, li, h1, h2, h3, h4"));
+      const selCenterY = selRect.top + selRect.height / 2;
+      const lineElements = allSpans.filter((el) => {
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return false;
+        const cY = r.top + r.height / 2;
+        return Math.abs(cY - selCenterY) < 18;
+      });
+
+      if (lineElements.length > 0) {
+        lineElements.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+        surroundingLine = lineElements.map((el) => el.textContent || "").join(" ").replace(/\s+/g, " ").trim();
+      }
+    }
+  } catch (err) {
+    console.warn("[Reader AI] extractDomSelectionDetails error in content script:", err);
+  }
+
+  return {
+    rawSelection,
+    prefixAttached,
+    suffixAttached,
+    surroundingLine
+  };
+}
+
 function analyzeSelection(selection: Selection, range: Range, surroundingText: string = ""): {
   originalSelection: string;
   resolvedSelection: string;
   selectionType: SelectionData["selectionType"];
 } {
+  const domDetails = extractDomSelectionDetails(range);
   const raw = selection.toString();
   const original = (raw ?? "").trim();
 
@@ -350,12 +467,7 @@ function analyzeSelection(selection: Selection, range: Range, surroundingText: s
 
   // Pure punctuation / symbol handling
   if (/^[^\w\s]+$/.test(original)) {
-    let prefixAttached = "";
-    if (range.startContainer.nodeType === Node.TEXT_NODE) {
-      const textBefore = (range.startContainer.textContent || "").slice(0, range.startOffset);
-      const match = textBefore.match(/[a-zA-Z0-9'’+#.-]+$/);
-      if (match) prefixAttached = match[0];
-    }
+    let prefixAttached = domDetails.prefixAttached;
     const cleanPrefix = prefixAttached.replace(/^.*[\s.,;:!?()[\]{}'’"]/, "");
     if (cleanPrefix && isTechnicalToken(`${cleanPrefix}${original}`)) {
       return { originalSelection: original, resolvedSelection: `${cleanPrefix}${original}`, selectionType: "word" };
@@ -370,13 +482,12 @@ function analyzeSelection(selection: Selection, range: Range, surroundingText: s
     return { originalSelection: original, resolvedSelection: original, selectionType: "unknown" };
   }
 
-
   const cleaned = cleanSelection(original);
   if (!cleaned || !/[a-zA-Z0-9]/.test(cleaned)) {
     return { originalSelection: original, resolvedSelection: original, selectionType: "unknown" };
   }
 
-  // 4. Complete Sentence / Passage Check
+  // Complete Sentence / Passage Check
   const sentenceCount = (cleaned.match(/[.!?](?:\s|$)/g) ?? []).length;
   const words = cleaned.split(/\s+/).filter(Boolean);
   if (sentenceCount > 1 || words.length > 40) {
@@ -386,23 +497,10 @@ function analyzeSelection(selection: Selection, range: Range, surroundingText: s
     return { originalSelection: original, resolvedSelection: cleaned, selectionType: "sentence" };
   }
 
-  let prefixAttached = "";
-  let suffixAttached = "";
-  if (range.startContainer.nodeType === Node.TEXT_NODE) {
-    const textBefore = (range.startContainer.textContent || "").slice(0, range.startOffset);
-    const match = textBefore.match(/[a-zA-Z0-9'’+#.-]+$/);
-    if (match) prefixAttached = match[0];
-  }
-  if (range.endContainer.nodeType === Node.TEXT_NODE) {
-    const textAfter = (range.endContainer.textContent || "").slice(range.endOffset);
-    const match = textAfter.match(/^[a-zA-Z0-9'’+#.-]+/);
-    if (match) suffixAttached = match[0];
-  }
+  const cleanPrefix = domDetails.prefixAttached.replace(/^.*[\s.,;:!?()[\]{}'’"]/, "");
+  const cleanSuffix = domDetails.suffixAttached.replace(/[\s.,;:!?()[\]{}'’"].*$/, "");
 
-  const cleanPrefix = prefixAttached.replace(/^.*[\s.,;:!?()[\]{}'’"]/, "");
-  const cleanSuffix = suffixAttached.replace(/[\s.,;:!?()[\]{}'’"].*$/, "");
-
-  // 5. Corrupted boundary slice detection (e.g. "ient registr" cutting across "patient registration")
+  // Corrupted boundary slice detection (e.g. "ient registr" cutting across "patient registration")
   if (words.length > 1 && (cleanPrefix || cleanSuffix)) {
     const lastWord = words[words.length - 1];
     if (cleanSuffix && /^[a-zA-Z0-9'’+#.-]+$/.test(lastWord)) {
@@ -425,7 +523,7 @@ function analyzeSelection(selection: Selection, range: Range, surroundingText: s
         for (const w of words) {
           const lowerW = w.toLowerCase();
           const lowerT = token.toLowerCase();
-          if (lowerT.startsWith(lowerW) || lowerT.endsWith(lowerW) || (lowerW.length >= 4 && lowerT.includes(lowerW))) {
+          if (lowerT.startsWith(lowerW) || lowerT.endsWith(lowerW) || (lowerW.length >= 3 && lowerT.includes(lowerW))) {
             if (lowerW.length > bestOverlap) {
               bestOverlap = lowerW.length;
               bestToken = token;
@@ -433,31 +531,34 @@ function analyzeSelection(selection: Selection, range: Range, surroundingText: s
           }
         }
       }
-      if (bestToken && bestOverlap >= 3) {
+      if (bestToken && bestOverlap >= 3 && isMeaningfulWord(bestToken)) {
         return { originalSelection: original, resolvedSelection: bestToken, selectionType: "partial-word" };
       }
     }
   }
 
-  // 6. Multi-word Phrase Check
+  // Multi-word Phrase Check
   if (words.length > 1 && !/^[+*\/=<>~`|^&%$@!?:;,\s]+/.test(original) && !cleanPrefix && !cleanSuffix) {
     if (words.every((w) => isMeaningfulWord(w))) {
       return { originalSelection: original, resolvedSelection: cleaned, selectionType: "phrase" };
     }
   }
 
-  // 7. Word / Fragment Target Determination
+  // Word / Fragment Target Determination
   const targetFragment = words.length === 1 ? words[0] : cleaned;
 
   if ((cleanPrefix || cleanSuffix) && /^[a-zA-Z0-9'’+#.-]+$/.test(targetFragment)) {
     const fullWord = cleanSelection(`${cleanPrefix}${targetFragment}${cleanSuffix}`);
     if (fullWord.toLowerCase() !== targetFragment.toLowerCase() && fullWord.length > targetFragment.length) {
-      return { originalSelection: original, resolvedSelection: fullWord, selectionType: "partial-word" };
+      if (isMeaningfulWord(fullWord) || isTechnicalToken(fullWord)) {
+        return { originalSelection: original, resolvedSelection: fullWord, selectionType: "partial-word" };
+      }
     }
   }
 
-  if (surroundingText && targetFragment.length >= 2) {
-    const tokens = extractTokensFromText(surroundingText);
+  const effectiveContext = (domDetails.surroundingLine ? domDetails.surroundingLine + " " : "") + surroundingText;
+  if (effectiveContext && targetFragment.length >= 2) {
+    const tokens = extractTokensFromText(effectiveContext);
     const lowerTarget = targetFragment.toLowerCase();
 
     const exactMatch = tokens.find((t) => t.toLowerCase() === lowerTarget);
@@ -470,23 +571,28 @@ function analyzeSelection(selection: Selection, range: Range, surroundingText: s
       return lowerT !== lowerTarget && (
         lowerT.startsWith(lowerTarget) ||
         lowerT.endsWith(lowerTarget) ||
-        (lowerTarget.length >= 4 && lowerT.includes(lowerTarget))
+        (lowerTarget.length >= 3 && lowerT.includes(lowerTarget))
       );
     });
 
-    if (candidate && candidate.length > targetFragment.length) {
+    if (candidate && candidate.length > targetFragment.length && (isMeaningfulWord(candidate) || isTechnicalToken(candidate))) {
       return { originalSelection: original, resolvedSelection: candidate, selectionType: "partial-word" };
     }
   }
 
-  if (isMeaningfulWord(cleaned)) {
+  if (isMeaningfulWord(cleaned) || isTechnicalToken(cleaned)) {
     return { originalSelection: original, resolvedSelection: cleaned, selectionType: "word" };
+  }
+
+  if (!isMeaningfulWord(cleaned) && words.length === 1 && cleaned.length <= 4) {
+    return { originalSelection: original, resolvedSelection: cleaned, selectionType: "unknown" };
   }
 
   return { originalSelection: original, resolvedSelection: cleaned, selectionType: "word" };
 }
 
 function removePopup(): void {
+  stopPronunciation();
   try {
     const existingHosts = document.querySelectorAll(`#${HOST_ID}`);
     existingHosts.forEach((host) => host.remove());
@@ -499,6 +605,316 @@ function removePopup(): void {
   activePopupElement = null;
   activeRange = null;
   interactingWithPopup = false;
+}
+
+const SPEAKER_ICON_SVG = `
+  <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+    <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+  </svg>
+`;
+
+const STOP_ICON_SVG = `
+  <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor">
+    <rect x="5" y="5" width="14" height="14" rx="2" ry="2"/>
+  </svg>
+`;
+
+let activeSpeakingButton: HTMLElement | null = null;
+let activeSpeakingTimeout: number | null = null;
+
+function setButtonSpeaking(button: HTMLElement, isSpeaking: boolean): void {
+  const iconSpan = button.querySelector(".btn-icon");
+  const textSpan = button.querySelector(".btn-text");
+
+  if (isSpeaking) {
+    button.classList.add("speaking");
+    if (iconSpan) iconSpan.innerHTML = STOP_ICON_SVG;
+    if (textSpan) textSpan.textContent = "Stop";
+    button.removeAttribute("title");
+    button.setAttribute("aria-label", "Stop pronunciation");
+  } else {
+    button.classList.remove("speaking");
+    if (iconSpan) iconSpan.innerHTML = SPEAKER_ICON_SVG;
+    if (textSpan) textSpan.textContent = "Listen";
+    button.removeAttribute("title");
+    button.setAttribute("aria-label", "Listen to pronunciation");
+  }
+}
+
+function clearSpeakingState(): void {
+  if (activeSpeakingTimeout !== null) {
+    clearTimeout(activeSpeakingTimeout);
+    activeSpeakingTimeout = null;
+  }
+  if (activeSpeakingButton) {
+    setButtonSpeaking(activeSpeakingButton, false);
+    activeSpeakingButton = null;
+  }
+}
+
+function stopPronunciation(button?: HTMLElement | null): void {
+  clearSpeakingState();
+
+  if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+    try {
+      chrome.runtime.sendMessage({ type: "STOP_TTS" }, () => {
+        if (chrome.runtime.lastError) { /* ignore */ }
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  if (typeof window !== "undefined" && "speechSynthesis" in window) {
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function playPronunciation(targetWord: string, button?: HTMLElement | null): void {
+  console.log("[Reader AI TTS] Listen clicked");
+  console.log("[Reader AI TTS] Target:", targetWord);
+
+  const resolvedSelection = targetWord;
+
+  if (!isEligibleForPronunciation(resolvedSelection)) {
+    console.log("[Reader AI TTS] Target ineligible for pronunciation:", resolvedSelection);
+    if (button) {
+      if (button instanceof HTMLButtonElement) button.disabled = true;
+      button.style.display = "none";
+    }
+    return;
+  }
+
+  // Toggle off if currently speaking
+  if (button && button.classList.contains("speaking")) {
+    stopPronunciation(button);
+    return;
+  }
+
+  clearSpeakingState();
+
+  const spokenText = normalizeSpokenText(resolvedSelection);
+
+  if (button) {
+    activeSpeakingButton = button;
+    setButtonSpeaking(button, true);
+    activeSpeakingTimeout = window.setTimeout(() => {
+      clearSpeakingState();
+    }, Math.max(5000, spokenText.length * 400));
+  }
+
+  const messagePayload = {
+    type: "SPEAK_PRONUNCIATION",
+    text: spokenText,
+    lang: "en-US"
+  };
+
+  console.log("[Reader AI TTS] Message sent");
+
+  // Send SPEAK_PRONUNCIATION message to background service worker (chrome.tts)
+  if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+    try {
+      chrome.runtime.sendMessage(
+        messagePayload,
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.error("[Reader AI TTS] Runtime error in content script:", chrome.runtime.lastError.message);
+            fallbackSpeechSynthesis(spokenText, button);
+          } else {
+            console.log("[Reader AI TTS] Service worker response:", response);
+            if (response && (response.success === false || response.ok === false)) {
+              console.warn("[Reader AI TTS] Service worker error, using fallback SpeechSynthesis:", response.error);
+              fallbackSpeechSynthesis(spokenText, button);
+            }
+          }
+        }
+      );
+      return;
+    } catch (err) {
+      console.error("[Reader AI TTS] Exception sending TTS message:", err);
+      fallbackSpeechSynthesis(spokenText, button);
+      return;
+    }
+  }
+
+  fallbackSpeechSynthesis(spokenText, button);
+}
+
+// Window message bridge for pages communicating with extension TTS
+if (typeof window !== "undefined") {
+  window.addEventListener("message", (event) => {
+    if (event.source !== window || !event.data || typeof event.data !== "object") return;
+    if (
+      (event.data.type === "READER_AI_TTS_SPEAK" || event.data.type === "SPEAK_WORD" || event.data.type === "SPEAK_PRONUNCIATION") &&
+      typeof event.data.text === "string"
+    ) {
+      if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+        chrome.runtime.sendMessage({
+          type: "SPEAK_PRONUNCIATION",
+          text: event.data.text,
+          lang: event.data.lang || "en-US"
+        });
+      }
+    } else if (event.data.type === "READER_AI_TTS_STOP" || event.data.type === "STOP_TTS") {
+      if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+        chrome.runtime.sendMessage({ type: "STOP_TTS" });
+      }
+    }
+  });
+}
+
+function fallbackSpeechSynthesis(spokenText: string, button?: HTMLElement | null): void {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+    console.warn("[Reader AI TTS] SpeechSynthesis is unavailable in this environment");
+    clearSpeakingState();
+    return;
+  }
+
+  try {
+    const utterance = new SpeechSynthesisUtterance(spokenText);
+    utterance.lang = "en-US";
+    utterance.rate = 0.8;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+
+    // Prevent GC mid-speech in Chromium/Chrome
+    (window as unknown as { __readerAiActiveUtterance?: SpeechSynthesisUtterance | null }).__readerAiActiveUtterance = utterance;
+
+    utterance.onstart = () => {
+      console.log("[Reader AI TTS] SpeechSynthesis fallback started:", spokenText);
+    };
+
+    utterance.onend = () => {
+      console.log("[Reader AI TTS] SpeechSynthesis fallback ended:", spokenText);
+      (window as unknown as { __readerAiActiveUtterance?: SpeechSynthesisUtterance | null }).__readerAiActiveUtterance = null;
+      clearSpeakingState();
+    };
+
+    utterance.onerror = (e) => {
+      console.warn("[Reader AI TTS] SpeechSynthesis fallback error:", e);
+      (window as unknown as { __readerAiActiveUtterance?: SpeechSynthesisUtterance | null }).__readerAiActiveUtterance = null;
+      clearSpeakingState();
+    };
+
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+    if (window.speechSynthesis.paused) {
+      window.speechSynthesis.resume();
+    }
+  } catch (e) {
+    console.error("[Reader AI TTS] SpeechSynthesis fallback execution error:", e);
+    clearSpeakingState();
+  }
+}
+
+if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
+  chrome.runtime.onMessage.addListener((message: unknown) => {
+    if (message && typeof message === "object" && "type" in message) {
+      if ((message as { type: string }).type === "TTS_STATE_CHANGE") {
+        const state = message as { isSpeaking?: boolean };
+        if (!state.isSpeaking) {
+          clearSpeakingState();
+        }
+      }
+    }
+  });
+}
+
+function renderPronunciationSection(parent: HTMLElement, targetWord: string, customIpa?: string, rawSelection?: string): HTMLElement | null {
+  if (!targetWord || !isEligibleForPronunciation(targetWord)) {
+    const section = document.createElement("div");
+    section.className = "pronunciation-section";
+    const note = document.createElement("div");
+    note.style.fontSize = "11px";
+    note.style.color = "#858279";
+    note.style.fontStyle = "italic";
+    note.style.margin = "4px 0";
+    note.textContent = "Select a complete word to hear pronunciation.";
+    section.appendChild(note);
+    parent.appendChild(section);
+    return section;
+  }
+
+  const pron = resolvePronunciation(targetWord, customIpa);
+  if (!pron) return null;
+  const ipa = pron.ipa;
+  const soundsLike = pron.phonetic;
+
+  console.log("[Reader AI Pronunciation]");
+  console.log("Raw selection:", rawSelection || targetWord);
+  console.log("Resolved term:", pron.resolvedTerm);
+  console.log("Pronunciation target:", pron.resolvedTerm);
+  console.log("IPA:", ipa || "none");
+  console.log("TTS text:", pron.spokenText || pron.resolvedTerm);
+
+  // Never show fake IPA: if neither reliable IPA nor readable phonetic exists, omit
+  if (!ipa && !soundsLike) return null;
+
+  const section = document.createElement("div");
+  section.className = "pronunciation-section";
+
+  // Label: PRONUNCIATION
+  const label = document.createElement("div");
+  label.className = "pronunciation-label";
+  label.textContent = "PRONUNCIATION";
+  section.appendChild(label);
+
+  // Audio row: 🔊 Listen  /IPA/
+  const audioRow = document.createElement("div");
+  audioRow.className = "pronunciation-audio-row";
+
+  const listenBtn = document.createElement("button");
+  listenBtn.className = "pronunciation-listen-btn";
+  listenBtn.type = "button";
+  // Remove browser tooltip, accessible aria-label
+  listenBtn.setAttribute("aria-label", "Listen to pronunciation");
+
+  const iconSpan = document.createElement("span");
+  iconSpan.className = "btn-icon";
+  iconSpan.innerHTML = SPEAKER_ICON_SVG;
+  listenBtn.appendChild(iconSpan);
+
+  const textSpan = document.createElement("span");
+  textSpan.className = "btn-text";
+  textSpan.textContent = "Listen";
+  listenBtn.appendChild(textSpan);
+
+  listenBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    playPronunciation(pron.spokenText || pron.resolvedTerm, listenBtn);
+  });
+  audioRow.appendChild(listenBtn);
+
+  if (ipa && isValidIpa(ipa, pron.resolvedTerm)) {
+    const ipaSpan = document.createElement("span");
+    ipaSpan.className = "pronunciation-ipa";
+    ipaSpan.textContent = ipa;
+    audioRow.appendChild(ipaSpan);
+  }
+  section.appendChild(audioRow);
+
+  // Sounds like: readable phonetic pronunciation
+  if (soundsLike) {
+    const soundsLikeDiv = document.createElement("div");
+    soundsLikeDiv.className = "pronunciation-sounds-like";
+    soundsLikeDiv.appendChild(document.createTextNode("Sounds like: "));
+    const phoneticSpan = document.createElement("span");
+    phoneticSpan.className = "phonetic-text";
+    phoneticSpan.textContent = soundsLike;
+    soundsLikeDiv.appendChild(phoneticSpan);
+    section.appendChild(soundsLikeDiv);
+  }
+
+  parent.appendChild(section);
+  return section;
+}
+
+function renderPronunciationRow(parent: HTMLElement, targetWord: string, ipaText?: string, rawSelection?: string): HTMLElement | null {
+  return renderPronunciationSection(parent, targetWord, ipaText, rawSelection);
 }
 
 function addText(parent: HTMLElement, text: string, className: string): HTMLElement {
@@ -525,6 +941,7 @@ function renderResult(body: HTMLElement, result: Explanation): HTMLButtonElement
   if (result.type === "word") {
     addText(body, (result.word || "").toLocaleUpperCase(), "selection");
     if (result.partOfSpeech) addText(body, result.partOfSpeech, "part-of-speech");
+    renderPronunciationRow(body, result.word || "", result.pronunciation);
     addText(body, "MEANING", "label");
     addText(body, result.meaning || result.simpleMeaning || "", "copy");
     addText(body, "IN THIS CONTEXT", "label");
@@ -535,6 +952,9 @@ function renderResult(body: HTMLElement, result: Explanation): HTMLButtonElement
     }
   } else if (result.type === "phrase") {
     addText(body, result.phrase || "", "selection");
+    if (result.pronunciation) {
+      renderPronunciationRow(body, result.phrase || "", result.pronunciation);
+    }
     addText(body, "MEANING", "label");
     addText(body, result.meaning || "", "copy");
     addText(body, "IN THIS CONTEXT", "label");
@@ -565,12 +985,20 @@ function renderResult(body: HTMLElement, result: Explanation): HTMLButtonElement
 function renderError(body: HTMLElement, data: SelectionData, errorMsg: string, retry: () => void): void {
   clearBody(body);
   addText(body, (data.resolvedSelection || data.selectedText).toLocaleUpperCase(), "selection");
-  addText(body, "Unable to explain this word right now.", "error-title");
-  addText(body, errorMsg || "Something went wrong while communicating with Gemini.", "error-copy");
+
+  const lower = (errorMsg || "").toLowerCase();
+  const isBusy = lower.includes("busy") || lower.includes("demand") || lower.includes("unavailable") || lower.includes("temporarily") || lower.includes("503") || lower.includes("429");
+
+  const title = isBusy ? "AI is temporarily busy." : "Unable to explain this selection right now.";
+  const copy = isBusy ? "AI is temporarily busy. Please try again." : (errorMsg || "Something went wrong while communicating with Gemini.");
+
+  addText(body, title, "error-title");
+  addText(body, copy, "error-copy");
+
   const tryAgain = document.createElement("button");
-  tryAgain.className = "action";
+  tryAgain.className = "action retry-action-btn";
   tryAgain.type = "button";
-  tryAgain.textContent = "Try Again";
+  tryAgain.textContent = "Retry";
   tryAgain.addEventListener("click", (e) => {
     e.stopPropagation();
     retry();
@@ -823,6 +1251,122 @@ function renderPopup(data: SelectionData, range: Range): void {
       color: #1a1a18;
     }
     .part-of-speech { margin-top: 4px; color: #858279; font-size: 11px; font-style: italic; }
+    .pronunciation-section {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      margin-top: 10px;
+      margin-bottom: 4px;
+      padding: 8px 10px;
+      background: #f4f3ee;
+      border: 1px solid #e7e5de;
+      border-radius: 6px;
+    }
+    .pronunciation-label {
+      color: #858279;
+      font-size: 9.5px;
+      font-weight: 700;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      line-height: 1;
+    }
+    .pronunciation-audio-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .pronunciation-listen-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border: 1px solid #d8d6ce;
+      border-radius: 14px;
+      background: #ffffff;
+      color: #20201e;
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+      line-height: 1;
+      transition: all 0.15s ease;
+      flex-shrink: 0;
+    }
+    .pronunciation-listen-btn:hover {
+      background: #eeece5;
+      border-color: #bebcb4;
+    }
+    .pronunciation-listen-btn.speaking {
+      background: #20201e;
+      color: #ffffff;
+      border-color: #20201e;
+      animation: reader-ai-pulse 1s ease-in-out infinite;
+    }
+    .pronunciation-listen-btn .btn-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .pronunciation-listen-btn svg {
+      display: block;
+      fill: currentColor;
+    }
+    .pronunciation-listen-btn:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
+    .pronunciation-ipa {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Lucida Grande", sans-serif;
+      font-size: 13px;
+      color: #5d5b55;
+      letter-spacing: 0.02em;
+    }
+    .pronunciation-sounds-like {
+      font-size: 11.5px;
+      color: #77756e;
+      line-height: 1.35;
+    }
+    .pronunciation-sounds-like .phonetic-text {
+      font-weight: 600;
+      color: #20201e;
+    }
+    .pronunciation-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
+      margin-bottom: 2px;
+    }
+    .speaker-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      border: 1px solid #d8d6ce;
+      border-radius: 50%;
+      background: #f4f3ee;
+      color: #5d5b55;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      flex-shrink: 0;
+    }
+    .speaker-btn:hover {
+      background: #e9e7df;
+      color: #20201e;
+      border-color: #bebcb4;
+    }
+    .speaker-btn.speaking {
+      background: #20201e;
+      color: #fff;
+      border-color: #20201e;
+      animation: reader-ai-pulse 1s ease-in-out infinite;
+    }
+    .speaker-btn:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
     .label { margin-top: 14px; color: #858279; font-size: 10px; font-weight: 700; letter-spacing: .16em; }
     .context {
       margin-top: 6px;
@@ -912,12 +1456,32 @@ function renderPopup(data: SelectionData, range: Range): void {
     e.stopPropagation();
   }, { passive: true });
 
-  if (data.selectionType === "partial-word") {
+  if (isCamelCase(data.originalSelection)) {
+    const resolved = splitCamelCase(data.originalSelection);
+    addText(body, resolved.toLocaleUpperCase(), "selection");
+    addText(body, `You selected: "${data.originalSelection}"`, "part-of-speech");
+    if (isEligibleForPronunciation(resolved, data.selectionType)) {
+      renderPronunciationRow(body, resolved, undefined, data.originalSelection);
+    }
+  } else if (data.selectionType === "partial-word") {
     addText(body, "DID YOU MEAN?", "label");
     addText(body, data.resolvedSelection.toLocaleUpperCase(), "selection");
     addText(body, `You selected: "${data.originalSelection}"`, "part-of-speech");
+    if (isEligibleForPronunciation(data.resolvedSelection, data.selectionType)) {
+      renderPronunciationRow(body, data.resolvedSelection, undefined, data.originalSelection);
+    }
+  } else if (data.selectionType === "word" || data.selectionType === "phrase") {
+    addText(body, data.resolvedSelection.toLocaleUpperCase(), "selection");
+    if (isEligibleForPronunciation(data.resolvedSelection, data.selectionType)) {
+      renderPronunciationRow(body, data.resolvedSelection, undefined, data.originalSelection);
+    } else if (data.selectionType === "word") {
+      renderPronunciationRow(body, data.resolvedSelection, undefined, data.originalSelection);
+    }
   } else {
     addText(body, data.resolvedSelection.toLocaleUpperCase(), "selection");
+    if (isEligibleForPronunciation(data.resolvedSelection, data.selectionType)) {
+      renderPronunciationRow(body, data.resolvedSelection, undefined, data.originalSelection);
+    }
   }
 
   addText(body, "CONTEXT", "label");

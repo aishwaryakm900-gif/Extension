@@ -2,7 +2,15 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
-import { buildReadingContext, healExtractedText, cleanSelection, resolveSelectionCandidate, type ReadingContext } from "../../lib/reading-context";
+import { buildReadingContext, healExtractedText, cleanSelection, resolveSelectionCandidate, extractDomSelectionDetails, type ReadingContext } from "../../lib/reading-context";
+import {
+  resolvePronunciation,
+  isCamelCase,
+  splitCamelCase,
+  isEligibleForPronunciation,
+  normalizeSpokenText,
+  isValidIpa
+} from "../../lib/pronunciation";
 
 // The worker is emitted by Next's client bundle, so the PDF bytes remain local.
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
@@ -32,8 +40,215 @@ type Explanation = Record<string, unknown>;
 type PopupState = {
   context: ReadingContext;
   left: number;
-  top: number;
+  top?: number;
+  bottom?: number;
+  maxHeight: number;
+  rect: DOMRect;
 };
+
+function playPronunciation(
+  targetWord: string,
+  ipaText?: string,
+  onStateChange?: (isSpeaking: boolean) => void
+) {
+  console.log("[Reader AI TTS] Listen clicked");
+
+  if (!targetWord || !isEligibleForPronunciation(targetWord)) {
+    console.warn("[Reader AI TTS] Error: Target ineligible for pronunciation:", targetWord);
+    onStateChange?.(false);
+    return;
+  }
+
+  const pronData = resolvePronunciation(targetWord, ipaText);
+  const ttsText = pronData?.spokenText || normalizeSpokenText(targetWord);
+
+  console.log("[Reader AI Pronunciation]");
+  console.log("Raw selection:", targetWord);
+  console.log("Resolved term:", pronData?.resolvedTerm || targetWord);
+  console.log("Pronunciation target:", targetWord);
+  console.log("IPA:", pronData?.ipa || "none");
+  console.log("TTS text:", ttsText);
+
+  // Check if running within Chrome extension origin (chrome-extension://)
+  const isExtensionOrigin = typeof window !== "undefined" && window.location.protocol === "chrome-extension:";
+
+  if (isExtensionOrigin && typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+    console.log("[Reader AI TTS] Message sent");
+    onStateChange?.(true);
+    chrome.runtime.sendMessage(
+      {
+        type: "SPEAK_PRONUNCIATION",
+        text: ttsText,
+        lang: "en-US"
+      },
+      (response) => {
+        if (chrome.runtime.lastError || !response || response.success === false) {
+          console.warn("[Reader AI TTS] Extension TTS failed, using fallback SpeechSynthesis:", chrome.runtime.lastError?.message || response?.error);
+          fallbackSpeechSynthesis(ttsText, onStateChange);
+        }
+      }
+    );
+    return;
+  }
+
+  fallbackSpeechSynthesis(ttsText, onStateChange);
+}
+
+function fallbackSpeechSynthesis(spokenText: string, onStateChange?: (isSpeaking: boolean) => void) {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+    console.error("[Reader AI TTS] Error: SpeechSynthesis is not supported");
+    onStateChange?.(false);
+    return;
+  }
+
+  try {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(spokenText);
+    utterance.lang = "en-US";
+    utterance.rate = 0.8;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+
+    // Prevent GC in Chromium/Chrome
+    (window as unknown as { __readerAiActiveUtterance?: SpeechSynthesisUtterance | null }).__readerAiActiveUtterance = utterance;
+
+    utterance.onstart = () => {
+      console.log("[Reader AI TTS] Event: start");
+      onStateChange?.(true);
+    };
+    utterance.onend = () => {
+      console.log("[Reader AI TTS] Event: end");
+      (window as unknown as { __readerAiActiveUtterance?: SpeechSynthesisUtterance | null }).__readerAiActiveUtterance = null;
+      onStateChange?.(false);
+    };
+    utterance.onerror = (e) => {
+      console.error("[Reader AI TTS] Error: SpeechSynthesis error:", e);
+      (window as unknown as { __readerAiActiveUtterance?: SpeechSynthesisUtterance | null }).__readerAiActiveUtterance = null;
+      onStateChange?.(false);
+    };
+
+    window.speechSynthesis.speak(utterance);
+    if (window.speechSynthesis.paused) {
+      window.speechSynthesis.resume();
+    }
+  } catch (e) {
+    console.error("[Reader AI TTS] Error: SpeechSynthesis execution error:", e);
+    onStateChange?.(false);
+  }
+}
+
+function stopPronunciation() {
+  if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+    try {
+      chrome.runtime.sendMessage({ type: "STOP_TTS" });
+    } catch {
+      // ignore
+    }
+  }
+  if (typeof window !== "undefined") {
+    window.postMessage({ type: "READER_AI_TTS_STOP" }, "*");
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+  }
+}
+
+function PronunciationRow({
+  targetWord,
+  ipaText
+}: {
+  targetWord: string;
+  ipaText?: string;
+}) {
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  // Safety timeout: Never stay stuck in speaking state forever
+  useEffect(() => {
+    if (!isSpeaking) return;
+    const timer = window.setTimeout(() => {
+      console.warn("[Reader AI TTS] Safety timeout reached, resetting state to idle");
+      setIsSpeaking(false);
+    }, 7000);
+    return () => window.clearTimeout(timer);
+  }, [isSpeaking]);
+
+  if (!targetWord || !isEligibleForPronunciation(targetWord)) {
+    return (
+      <div className="pronunciation-hint" style={{ fontSize: "11px", color: "#858279", fontStyle: "italic", margin: "6px 0 2px" }}>
+        Select a complete word to hear pronunciation.
+      </div>
+    );
+  }
+
+  const pron = resolvePronunciation(targetWord, ipaText);
+  if (!pron) {
+    return (
+      <div className="pronunciation-hint" style={{ fontSize: "11px", color: "#858279", fontStyle: "italic", margin: "6px 0 2px" }}>
+        Select a complete word to hear pronunciation.
+      </div>
+    );
+  }
+  const ipa = pron.ipa;
+  const soundsLike = pron.phonetic;
+
+  if (!ipa && !soundsLike) {
+    return (
+      <div className="pronunciation-hint" style={{ fontSize: "11px", color: "#858279", fontStyle: "italic", margin: "6px 0 2px" }}>
+        Select a complete word to hear pronunciation.
+      </div>
+    );
+  }
+
+  const handleSpeakerClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isSpeaking) {
+      stopPronunciation();
+      setIsSpeaking(false);
+    } else {
+      setIsSpeaking(true);
+      playPronunciation(pron.spokenText || pron.resolvedTerm, ipa, (speaking) => {
+        setIsSpeaking(speaking);
+      });
+    }
+  };
+
+  return (
+    <div className="pronunciation-section">
+      <div className="pronunciation-label">PRONUNCIATION</div>
+      <div className="pronunciation-audio-row">
+        <button
+          type="button"
+          className={`pronunciation-listen-btn ${isSpeaking ? "speaking" : ""}`}
+          aria-label={isSpeaking ? "Stop pronunciation" : "Listen to pronunciation"}
+          onClick={handleSpeakerClick}
+        >
+          <span className="btn-icon">
+            {isSpeaking ? (
+              <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor">
+                <rect x="5" y="5" width="14" height="14" rx="2" ry="2" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
+              </svg>
+            )}
+          </span>
+          <span className="btn-text">{isSpeaking ? "Stop" : "Listen"}</span>
+        </button>
+        {ipa && isValidIpa(ipa, pron.resolvedTerm) && (
+          <span className="pronunciation-ipa">
+            {ipa}
+          </span>
+        )}
+      </div>
+      {soundsLike && (
+        <div className="pronunciation-sounds-like">
+          Sounds like: <span className="phonetic-text">{soundsLike}</span>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function PdfReader() {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -121,7 +336,9 @@ export default function PdfReader() {
       const selection = window.getSelection();
       if (!selection || selection.rangeCount === 0) return;
 
-      const rawBrowserSelection = selection.toString();
+      const range = selection.getRangeAt(0);
+      const domDetails = extractDomSelectionDetails(range);
+      const rawBrowserSelection = domDetails.rawSelection || selection.toString();
       const normalizedSelection = rawBrowserSelection.trim().replace(/\s+/g, " ");
 
       console.log("RAW BROWSER SELECTION:", rawBrowserSelection);
@@ -131,40 +348,36 @@ export default function PdfReader() {
       console.log("END OFFSET:", selection.focusOffset);
       console.log(
         "RANGE TEXT:",
-        selection.rangeCount
-          ? selection.getRangeAt(0).toString()
-          : ""
+        range.toString()
       );
       console.log("NORMALIZED SELECTION:", normalizedSelection);
 
       if (!normalizedSelection) return;
 
-      const range = selection.getRangeAt(0);
       const rect = range.getBoundingClientRect();
 
-      let prefixAttached = "";
-      let suffixAttached = "";
-      if (range.startContainer.nodeType === Node.TEXT_NODE) {
-        const textBefore = (range.startContainer.textContent || "").slice(0, range.startOffset);
-        const match = textBefore.match(/[a-zA-Z0-9'’+#.-]+$/);
-        if (match) prefixAttached = match[0];
-      }
-      if (range.endContainer.nodeType === Node.TEXT_NODE) {
-        const textAfter = (range.endContainer.textContent || "").slice(range.endOffset);
-        const match = textAfter.match(/^[a-zA-Z0-9'’+#.-]+/);
-        if (match) suffixAttached = match[0];
-      }
-
-      const surroundingLine = page.lines.find((l) => l.toLowerCase().includes(normalizedSelection.toLowerCase())) ||
+      const surroundingLine = domDetails.surroundingLine ||
+        page.lines.find((l) => l.toLowerCase().includes(normalizedSelection.toLowerCase())) ||
         findLocalParagraph(page, normalizedSelection);
-      const analysis = resolveSelectionCandidate(normalizedSelection, prefixAttached, suffixAttached, surroundingLine);
 
-      if (analysis.selectionType === "unknown" || (!analysis.resolvedSelection && !analysis.originalSelection)) {
+      const analysis = resolveSelectionCandidate(
+        normalizedSelection,
+        domDetails.prefixAttached,
+        domDetails.suffixAttached,
+        surroundingLine
+      );
+
+      console.log("[Reader AI Pronunciation]");
+      console.log("Raw selection:", domDetails.rawSelection);
+      console.log("Resolved term:", analysis.resolvedSelection);
+      console.log("Pronunciation target:", analysis.resolvedSelection || normalizedSelection);
+
+      if (analysis.selectionType === "unknown" && !analysis.resolvedSelection && !analysis.originalSelection) {
         return;
       }
 
       const termToUse = analysis.resolvedSelection || analysis.originalSelection;
-      const localParagraph = findLocalParagraph(page, termToUse);
+      const localParagraph = domDetails.surroundingLine || findLocalParagraph(page, termToUse);
 
       const context = buildReadingContext({
         selectedText: termToUse,
@@ -182,7 +395,10 @@ export default function PdfReader() {
       setPopup({
         context,
         left: position.left,
-        top: position.top
+        top: position.top,
+        bottom: position.bottom,
+        maxHeight: position.maxHeight,
+        rect
       });
       setExplanation(null);
       setError("");
@@ -192,13 +408,13 @@ export default function PdfReader() {
 
   async function explain() {
     if (!popup) return;
-    setLoading(true);
-    setError("");
     try {
+      setError("");
+      setLoading(true);
       const payload = {
         originalSelection: popup.context.originalSelection,
         resolvedSelection: popup.context.resolvedSelection,
-        selectedText: popup.context.selectedText,
+        selectedText: popup.context.resolvedSelection || popup.context.selectedText,
         selectionType: popup.context.selectionType,
         context: popup.context.context,
         sentence: popup.context.sentence,
@@ -213,11 +429,27 @@ export default function PdfReader() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
-      const result = await response.json() as Explanation & { error?: string };
-      if (!response.ok) throw new Error(result.error ?? "Unable to explain this selection.");
+      const result = await response.json() as (Explanation & { error?: string; success?: boolean; retryable?: boolean });
+      if (!response.ok || (result && (result as { success?: boolean }).success === false)) {
+        const errorMsg = result?.error || (response.status === 503 || response.status === 429
+          ? "AI is temporarily busy. Please try again."
+          : "Unable to explain this selection right now.");
+        throw new Error(errorMsg);
+      }
       setExplanation(result);
+      setPopup((prev) => {
+        if (!prev) return null;
+        const pos = computePopupPosition(prev.rect, 480, 320);
+        return {
+          ...prev,
+          left: pos.left,
+          top: pos.top,
+          bottom: pos.bottom,
+          maxHeight: pos.maxHeight
+        };
+      });
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "Unable to explain this selection.");
+      setError(requestError instanceof Error ? requestError.message : "AI is temporarily busy. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -228,7 +460,10 @@ export default function PdfReader() {
       className="pdf-reader-shell"
       data-reader-ai="true"
       onMouseDown={(event) => {
-        if (!(event.target as HTMLElement).closest(".reader-ai-popup")) setPopup(null);
+        if (!(event.target as HTMLElement).closest(".reader-ai-popup")) {
+          stopPronunciation();
+          setPopup(null);
+        }
       }}
     >
       <header className="pdf-reader-header">
@@ -256,7 +491,12 @@ export default function PdfReader() {
       {popup && (
         <section
           className="reader-ai-popup"
-          style={{ left: popup.left, top: popup.top }}
+          style={{
+            left: `${popup.left}px`,
+            top: popup.top !== undefined ? `${popup.top}px` : undefined,
+            bottom: popup.bottom !== undefined ? `${popup.bottom}px` : undefined,
+            maxHeight: `${popup.maxHeight}px`
+          }}
           onMouseDown={(event) => event.stopPropagation()}
         >
           <div className="reader-popup-header">
@@ -268,24 +508,45 @@ export default function PdfReader() {
               type="button"
               className="close-btn"
               aria-label="Close"
-              onClick={() => setPopup(null)}
+              onClick={() => {
+                stopPronunciation();
+                setPopup(null);
+              }}
             >
               ×
             </button>
           </div>
-          <div className="reader-popup-body" onWheel={(e) => e.stopPropagation()}>
+          <div className="reader-popup-body">
             {!explanation && !loading && (
               <>
-                {popup.context.selectionType === "partial-word" ? (
+                {isCamelCase(popup.context.originalSelection || "") ? (
+                  <>
+                    <h2>{splitCamelCase(popup.context.originalSelection || "").toUpperCase()}</h2>
+                    <p style={{ fontStyle: "italic", fontSize: "12px", color: "#858279", margin: "2px 0 8px" }}>
+                      You selected: &ldquo;{popup.context.originalSelection}&rdquo;
+                    </p>
+                    {isEligibleForPronunciation(splitCamelCase(popup.context.originalSelection || ""), popup.context.selectionType) && (
+                      <PronunciationRow targetWord={splitCamelCase(popup.context.originalSelection || "")} />
+                    )}
+                  </>
+                ) : popup.context.selectionType === "partial-word" ? (
                   <>
                     <div className="popup-label">DID YOU MEAN?</div>
                     <h2>{popup.context.resolvedSelection?.toUpperCase()}</h2>
                     <p style={{ fontStyle: "italic", fontSize: "12px", color: "#858279", margin: "2px 0 8px" }}>
                       You selected: &ldquo;{popup.context.originalSelection}&rdquo;
                     </p>
+                    {isEligibleForPronunciation(popup.context.resolvedSelection || "", popup.context.selectionType) && (
+                      <PronunciationRow targetWord={popup.context.resolvedSelection || ""} />
+                    )}
                   </>
                 ) : (
-                  <h2>{popup.context.selectedText}</h2>
+                  <>
+                    <h2>{(popup.context.selectionType === "word" ? popup.context.resolvedSelection?.toUpperCase() : popup.context.selectedText) || popup.context.selectedText}</h2>
+                    {isEligibleForPronunciation(popup.context.resolvedSelection || popup.context.selectedText, popup.context.selectionType) && (
+                      <PronunciationRow targetWord={popup.context.resolvedSelection || popup.context.selectedText} />
+                    )}
+                  </>
                 )}
                 <div className="popup-label">CONTEXT</div>
                 <p>{popup.context.context || popup.context.sentence}</p>
@@ -300,12 +561,28 @@ export default function PdfReader() {
             )}
             {loading && (
               <>
-                <h2>{popup.context.selectedText}</h2>
+                <h2>{popup.context.selectedText.toUpperCase()}</h2>
                 <p className="analyzing">Analyzing context with Gemini...</p>
               </>
             )}
-            {explanation && <ExplanationView explanation={explanation} />}
-            {error && <p className="pdf-error">{error}</p>}
+            {explanation && (
+              <ExplanationView
+                explanation={explanation}
+                resolvedWord={popup.context.resolvedSelection || popup.context.selectedText}
+              />
+            )}
+            {error && !loading && (
+              <div className="reader-ai-error-box">
+                <p className="pdf-error">{error}</p>
+                <button
+                  type="button"
+                  className="explain-button retry-button"
+                  onClick={() => void explain()}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
           </div>
         </section>
       )}
@@ -313,41 +590,55 @@ export default function PdfReader() {
   );
 }
 
-function computePopupPosition(rect: DOMRect, estimatedHeight = 240, popupWidth = 320): { left: number; top: number; maxHeight: number } {
-  const gutter = 12;
+function computePopupPosition(rect: DOMRect, estimatedHeight = 240, popupWidth = 320): { left: number; top?: number; bottom?: number; maxHeight: number } {
+  const gutter = 16;
   const gap = 8;
   const viewportW = window.innerWidth;
   const viewportH = window.innerHeight;
 
-  // Center horizontally relative to selection
   const center = rect.left + rect.width / 2;
   const targetLeft = center - popupWidth / 2;
   const maxLeft = Math.max(gutter, viewportW - popupWidth - gutter);
   const left = Math.max(gutter, Math.min(targetLeft, maxLeft));
 
-  // Vertical placement
-  const roomBelow = viewportH - rect.bottom - gutter - gap;
-  const roomAbove = rect.top - gutter - gap;
-  const maxAllowedHeight = Math.min(viewportH * 0.7, 580);
+  const spaceBelow = viewportH - rect.bottom - gap - gutter;
+  const spaceAbove = rect.top - gap - gutter;
+  const maxAllowedHeight = Math.max(160, viewportH - 32);
 
-  let top: number;
-  let maxHeight: number;
+  let placeBelow: boolean;
+  let availableSpace: number;
 
-  if (roomBelow >= Math.min(estimatedHeight, maxAllowedHeight) || roomBelow >= roomAbove) {
-    // Place below
-    top = rect.bottom + gap;
-    maxHeight = Math.min(maxAllowedHeight, roomBelow);
+  if (spaceBelow >= Math.min(estimatedHeight, 380)) {
+    placeBelow = true;
+    availableSpace = spaceBelow;
+  } else if (spaceAbove >= Math.min(estimatedHeight, 380)) {
+    placeBelow = false;
+    availableSpace = spaceAbove;
   } else {
-    // Place above
-    maxHeight = Math.min(maxAllowedHeight, roomAbove);
-    top = Math.max(gutter, rect.top - maxHeight - gap);
+    if (spaceBelow >= spaceAbove) {
+      placeBelow = true;
+      availableSpace = spaceBelow;
+    } else {
+      placeBelow = false;
+      availableSpace = spaceAbove;
+    }
   }
 
-  return {
-    left: Math.round(left),
-    top: Math.round(top),
-    maxHeight: Math.round(maxHeight)
-  };
+  const maxHeight = Math.max(140, Math.min(availableSpace, maxAllowedHeight));
+
+  if (placeBelow) {
+    return {
+      left: Math.round(left),
+      top: Math.round(rect.bottom + gap),
+      maxHeight: Math.round(maxHeight)
+    };
+  } else {
+    return {
+      left: Math.round(left),
+      bottom: Math.round(viewportH - rect.top + gap),
+      maxHeight: Math.round(maxHeight)
+    };
+  }
 }
 
 function createTextLines(items: TextItemModel[]): string[] {
@@ -374,11 +665,9 @@ function createTextLines(items: TextItemModel[]): string[] {
       } else {
         const prev = group.items[i - 1];
         const gap = curr.left - (prev.left + prev.width);
-        // Only insert a space if there is an actual horizontal gap or either item has a space
         if (gap >= 2.5 || prev.text.endsWith(" ") || curr.text.startsWith(" ")) {
           lineStr = `${lineStr.trimEnd()} ${curr.text.trimStart()}`;
         } else {
-          // No gap: consecutive ligature or split word fragment (e.g. "lifest" + "yle")
           lineStr = `${lineStr}${curr.text}`;
         }
       }
@@ -407,14 +696,28 @@ function findLocalParagraph(page: PageModel, selectedText: string): string {
   return page.lines.slice(start, end).join(" ");
 }
 
-function ExplanationView({ explanation }: { explanation: Explanation }) {
+function ExplanationView({
+  explanation,
+  resolvedWord
+}: {
+  explanation: Explanation;
+  resolvedWord: string;
+}) {
   const type = explanation.type;
 
   if (type === "word") {
+    const word = String(explanation.word ?? resolvedWord ?? "");
+    const ipa = typeof explanation.pronunciation === "string" ? explanation.pronunciation : undefined;
+
     return (
       <div className="explanation-view">
-        <h2>{String(explanation.word ?? "").toUpperCase()}</h2>
-        {Boolean(explanation.partOfSpeech) && <div style={{ fontSize: "11px", fontStyle: "italic", color: "#858279", margin: "2px 0 6px" }}>{String(explanation.partOfSpeech)}</div>}
+        <h2>{word.toUpperCase()}</h2>
+        {Boolean(explanation.partOfSpeech) && (
+          <div style={{ fontSize: "11px", fontStyle: "italic", color: "#858279", margin: "2px 0 6px" }}>
+            {String(explanation.partOfSpeech)}
+          </div>
+        )}
+        <PronunciationRow targetWord={word} ipaText={ipa} />
         <div className="popup-label">MEANING</div>
         <p>{String(explanation.meaning ?? explanation.simpleMeaning ?? "")}</p>
         <div className="popup-label">IN THIS CONTEXT</div>
@@ -425,14 +728,28 @@ function ExplanationView({ explanation }: { explanation: Explanation }) {
             <p style={{ fontStyle: "italic" }}>{String(explanation.example)}</p>
           </>
         )}
+        {Array.isArray(explanation.keyPoints) && explanation.keyPoints.length > 0 && (
+          <>
+            <div className="popup-label">KEY POINTS</div>
+            <ul>
+              {explanation.keyPoints.map((point) => (
+                <li key={String(point)}>{String(point)}</li>
+              ))}
+            </ul>
+          </>
+        )}
       </div>
     );
   }
 
   if (type === "phrase") {
+    const phrase = String(explanation.phrase ?? resolvedWord ?? "");
+    const ipa = typeof explanation.pronunciation === "string" ? explanation.pronunciation : undefined;
+
     return (
       <div className="explanation-view">
-        <h2>{String(explanation.phrase ?? "")}</h2>
+        <h2>{phrase.toUpperCase()}</h2>
+        <PronunciationRow targetWord={phrase} ipaText={ipa} />
         <div className="popup-label">MEANING</div>
         <p>{String(explanation.meaning ?? "")}</p>
         <div className="popup-label">IN THIS CONTEXT</div>
@@ -449,13 +766,17 @@ function ExplanationView({ explanation }: { explanation: Explanation }) {
 
   return (
     <div className="explanation-view">
-      <h2>{String(explanation.selectedText ?? "")}</h2>
+      <h2>{String(explanation.selectedText ?? resolvedWord ?? "")}</h2>
       <div className="popup-label">SENTENCE EXPLANATION</div>
       <p>{String(explanation.simpleExplanation ?? "")}</p>
       {Array.isArray(explanation.keyPoints) && explanation.keyPoints.length > 0 && (
         <>
           <div className="popup-label">KEY POINTS</div>
-          <ul>{explanation.keyPoints.map((point) => <li key={String(point)}>{String(point)}</li>)}</ul>
+          <ul>
+            {explanation.keyPoints.map((point) => (
+              <li key={String(point)}>{String(point)}</li>
+            ))}
+          </ul>
         </>
       )}
     </div>

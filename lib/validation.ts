@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidIpa } from "./pronunciation";
 
 export const selectionTypeSchema = z.enum(["word", "partial-word", "phrase", "sentence", "passage", "unknown"]);
 
@@ -38,7 +39,11 @@ export const explainRequestSchema = z.object({
 const wordExplanationSchema = z.object({
   type: z.literal("word"),
   word: z.string().trim().min(1),
+  resolvedTerm: z.string().trim().optional(),
   partOfSpeech: z.string().trim().min(1).default("word"),
+  pronunciation: z.string().trim().optional(),
+  phoneticGuide: z.string().trim().optional(),
+  spokenText: z.string().trim().optional(),
   meaning: z.string().trim().min(1),
   simpleMeaning: z.string().trim().min(1),
   contextExplanation: z.string().trim().min(1),
@@ -48,6 +53,10 @@ const wordExplanationSchema = z.object({
 const phraseExplanationSchema = z.object({
   type: z.literal("phrase"),
   phrase: z.string().trim().min(1),
+  resolvedTerm: z.string().trim().optional(),
+  pronunciation: z.string().trim().optional(),
+  phoneticGuide: z.string().trim().optional(),
+  spokenText: z.string().trim().optional(),
   meaning: z.string().trim().min(1),
   simpleExplanation: z.string().trim().min(1),
   contextExplanation: z.string().trim().min(1)
@@ -82,10 +91,36 @@ export function normalizeExplanationData(raw: Record<string, unknown>): unknown 
     else data.type = "word";
   }
 
+  // Map phoneticGuide / soundsLike / phonetic
+  if (!data.phoneticGuide && data.phonetic) data.phoneticGuide = String(data.phonetic);
+  if (!data.phoneticGuide && data.soundsLike) data.phoneticGuide = String(data.soundsLike);
+
   if (data.type === "word") {
     if (!data.word && data.term) data.word = data.term;
     if (!data.word && data.selectedText) data.word = data.selectedText;
     if (!data.partOfSpeech) data.partOfSpeech = "word";
+
+    let ipaCandidate: string | undefined;
+    if (typeof data.pronunciation === "string") {
+      ipaCandidate = data.pronunciation.trim();
+    } else if (typeof data.ipa === "string") {
+      ipaCandidate = data.ipa.trim();
+    }
+
+    if (ipaCandidate) {
+      if (!ipaCandidate.startsWith("/")) ipaCandidate = `/${ipaCandidate}`;
+      if (!ipaCandidate.endsWith("/")) ipaCandidate = `${ipaCandidate}/`;
+      // Validate: Must be genuine IPA, not just the original text enclosed in slashes
+      const termToCheck = String(data.word || data.resolvedTerm || "");
+      if (isValidIpa(ipaCandidate, termToCheck)) {
+        data.pronunciation = ipaCandidate;
+      } else {
+        data.pronunciation = undefined;
+      }
+    } else {
+      data.pronunciation = undefined;
+    }
+
     if (!data.simpleMeaning && data.meaning) data.simpleMeaning = data.meaning;
     if (!data.contextExplanation && data.contextualMeaning) data.contextExplanation = data.contextualMeaning;
     if (!data.contextExplanation && data.meaning) data.contextExplanation = data.meaning;
@@ -94,6 +129,27 @@ export function normalizeExplanationData(raw: Record<string, unknown>): unknown 
   } else if (data.type === "phrase") {
     if (!data.phrase && data.term) data.phrase = data.term;
     if (!data.phrase && data.selectedText) data.phrase = data.selectedText;
+
+    let ipaCandidate: string | undefined;
+    if (typeof data.pronunciation === "string") {
+      ipaCandidate = data.pronunciation.trim();
+    } else if (typeof data.ipa === "string") {
+      ipaCandidate = data.ipa.trim();
+    }
+
+    if (ipaCandidate) {
+      if (!ipaCandidate.startsWith("/")) ipaCandidate = `/${ipaCandidate}`;
+      if (!ipaCandidate.endsWith("/")) ipaCandidate = `${ipaCandidate}/`;
+      const termToCheck = String(data.phrase || data.resolvedTerm || "");
+      if (isValidIpa(ipaCandidate, termToCheck)) {
+        data.pronunciation = ipaCandidate;
+      } else {
+        data.pronunciation = undefined;
+      }
+    } else {
+      data.pronunciation = undefined;
+    }
+
     if (!data.simpleExplanation && data.meaning) data.simpleExplanation = data.meaning;
     if (!data.contextExplanation && data.contextualMeaning) data.contextExplanation = data.contextualMeaning;
     if (!data.contextExplanation && data.meaning) data.contextExplanation = data.meaning;
