@@ -73,7 +73,10 @@ export const COMMON_TECH_TOKENS = new Set([
   "nuxt.js", "nest.js", "express.js", "three.js", "d3.js", "angular.js", "backbone.js",
   "rxjs", "graphql", "postgresql", "mysql", "nosql", "sqlite", "mongodb",
   "tensorflow", "pytorch", "opencv", "langchain", "langgraph", "scikit-learn",
-  "rag", "llm", "nlp", "ocr", "api", "sdk", "cli", "gui", "ui", "ux", "css", "html"
+  "rag", "llm", "nlp", "ocr", "api", "sdk", "cli", "gui", "ui", "ux", "css", "html",
+  "sql", "json", "yaml", "xml", "jwt", "oauth", "rest", "grpc", "wasm", "docker",
+  "k8s", "kubernetes", "git", "github", "ci", "cd", "cpu", "gpu", "ram", "rom",
+  "dns", "http", "https", "ssh", "ssl", "tls", "tcp", "udp", "ip", "url", "uri", "dom", "crud"
 ]);
 
 /**
@@ -106,7 +109,7 @@ export function isPhonotacticallyPlausible(word: string): boolean {
 
   // Implausible English clusters
   if (/zq|qj|qk|qx|qz|jx|xj|vf|vj|vk|vx|vz|zf|zj|zk|zx/.test(lower)) return false;
-  if (/q(?!u)/.test(lower) && lower !== "faq") return false;
+  if (/q(?!u)/.test(lower) && lower !== "faq" && lower !== "sql") return false;
   if (/^[^aeiouy]{4,}/.test(lower) && !/^(?:str|spl|scr|spr|schw|phth)/.test(lower)) return false;
   if (/[^aeiouy]{5,}/.test(lower) && !/(?:lengths|strengths|angst)/.test(lower)) return false;
 
@@ -213,7 +216,7 @@ export function classifySelection(selectedText: string): SelectionType {
 
   const words = normalized.split(/\s+/).filter(Boolean);
   const sentenceCount = (normalized.match(/[.!?](?:\s|$)/g) ?? []).length;
-  
+
   if (sentenceCount > 1 || words.length > 40) return "passage";
   if (sentenceCount === 1 || (words.length >= 6 && /^[A-Z]/.test(normalized)) || (words.length >= 8) || /[.!?]$/.test(normalized)) {
     return "sentence";

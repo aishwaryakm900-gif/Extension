@@ -6,7 +6,11 @@
   "permissions": [
     "tts"
   ],
-  "host_permissions": ["http://*/*", "https://*/*", "file:///*"],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "file:///*"
+  ],
   "background": {
     "service_worker": "dist/background.js",
     "type": "module"
@@ -17,14 +21,22 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["dist/pdf.worker.js"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "dist/pdf.worker.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ],
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["dist/content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "dist/content.js"
+      ],
       "run_at": "document_idle",
       "all_frames": true,
       "match_about_blank": true

@@ -285,3 +285,248 @@ body {
   .pdf-reading-stage { justify-content: start; overflow-x: auto; }
   .pdf-empty-state h1 { font-size: 34px; }
 }
+
+/* ==========================================================================
+   THEME SEGMENTED CONTROL
+   ========================================================================== */
+.theme-segmented-control {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  background: #eeebe2;
+  border: 1px solid #d8d6ce;
+  border-radius: 20px;
+  gap: 2px;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.theme-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 11px;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  color: #77756e;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.theme-option:hover {
+  color: #20201e;
+}
+
+.theme-option.active {
+  background: #ffffff;
+  color: #20201e;
+  box-shadow: 0 1px 3px rgba(32, 32, 30, 0.12);
+}
+
+.theme-option .theme-icon {
+  display: block;
+  flex-shrink: 0;
+}
+
+/* ==========================================================================
+   DARK THEME FOR PDF READER SHELL
+   ========================================================================== */
+.pdf-reader-shell[data-theme="dark"] {
+  background: #111113;
+  color: #e4e4e7;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pdf-reader-header,
+.pdf-reader-shell[data-theme="dark"] .pdf-reader-footer {
+  background: #18181b;
+  border-color: #27272a;
+  color: #a1a1aa;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pdf-brand {
+  color: #f4f4f5;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pdf-brand span {
+  color: #facc15;
+}
+
+.pdf-reader-shell[data-theme="dark"] .theme-segmented-control {
+  background: #242428;
+  border-color: #38383e;
+}
+
+.pdf-reader-shell[data-theme="dark"] .theme-option {
+  color: #a1a1aa;
+}
+
+.pdf-reader-shell[data-theme="dark"] .theme-option:hover {
+  color: #f4f4f5;
+}
+
+.pdf-reader-shell[data-theme="dark"] .theme-option.active {
+  background: #38383e;
+  color: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+.pdf-reader-shell[data-theme="dark"] .pdf-file-name {
+  color: #a1a1aa;
+}
+
+.pdf-reader-shell[data-theme="dark"] .open-pdf-button {
+  background: #f4f4f5;
+  color: #18181b;
+}
+
+.pdf-reader-shell[data-theme="dark"] .open-pdf-button:hover {
+  background: #ffffff;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pdf-empty-state h1 {
+  color: #ffffff;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pdf-empty-state p {
+  color: #a1a1aa;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pdf-page {
+  background: #18181b;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.65);
+  border: 1px solid #27272a;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pdf-page-image {
+  filter: invert(0.9) hue-rotate(180deg) contrast(1.05) brightness(0.92);
+}
+
+.pdf-reader-shell[data-theme="dark"] .pdf-text-layer ::selection,
+.pdf-reader-shell[data-theme="dark"] .textLayer ::selection {
+  background: rgba(96, 165, 250, 0.4);
+  color: transparent;
+}
+
+.pdf-reader-shell[data-theme="dark"] .reader-ai-popup {
+  background: #18181b;
+  border-color: #2e2e33;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.75), 0 4px 14px rgba(0, 0, 0, 0.5);
+  color: #e4e4e7;
+}
+
+.pdf-reader-shell[data-theme="dark"] .reader-popup-header {
+  background: #18181b;
+  border-bottom-color: #27272a;
+  color: #f4f4f5;
+}
+
+.pdf-reader-shell[data-theme="dark"] .brand-label .spark {
+  color: #facc15;
+}
+
+.pdf-reader-shell[data-theme="dark"] .close-btn {
+  color: #a1a1aa;
+}
+
+.pdf-reader-shell[data-theme="dark"] .close-btn:hover {
+  background: #27272a;
+  color: #ffffff;
+}
+
+.pdf-reader-shell[data-theme="dark"] .reader-popup-body {
+  scrollbar-color: #38383e transparent;
+}
+
+.pdf-reader-shell[data-theme="dark"] .reader-popup-body::-webkit-scrollbar-thumb {
+  background-color: #38383e;
+}
+
+.pdf-reader-shell[data-theme="dark"] .reader-popup-body::-webkit-scrollbar-thumb:hover {
+  background-color: #52525b;
+}
+
+.pdf-reader-shell[data-theme="dark"] .reader-ai-popup h2 {
+  color: #ffffff;
+}
+
+.pdf-reader-shell[data-theme="dark"] .reader-ai-popup p {
+  color: #d4d4d8;
+}
+
+.pdf-reader-shell[data-theme="dark"] .popup-label {
+  color: #a1a1aa;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pronunciation-section {
+  background: #202024;
+  border-color: #2e2e33;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pronunciation-label {
+  color: #a1a1aa;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pronunciation-listen-btn {
+  background: #27272a;
+  border-color: #3f3f46;
+  color: #f4f4f5;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pronunciation-listen-btn:hover {
+  background: #323238;
+  border-color: #52525b;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pronunciation-listen-btn.speaking {
+  background: #2563eb;
+  border-color: #3b82f6;
+  color: #ffffff;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pronunciation-sounds-like {
+  color: #a1a1aa;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pronunciation-sounds-like .phonetic-text {
+  color: #ffffff;
+}
+
+.pdf-reader-shell[data-theme="dark"] .pronunciation-ipa {
+  color: #93c5fd;
+}
+
+.pdf-reader-shell[data-theme="dark"] .speaker-btn {
+  background: #27272a;
+  border-color: #3f3f46;
+  color: #e4e4e7;
+}
+
+.pdf-reader-shell[data-theme="dark"] .speaker-btn:hover {
+  background: #323238;
+  color: #ffffff;
+  border-color: #52525b;
+}
+
+.pdf-reader-shell[data-theme="dark"] .speaker-btn.speaking {
+  background: #2563eb;
+  border-color: #3b82f6;
+  color: #ffffff;
+}
+
+.pdf-reader-shell[data-theme="dark"] .explain-button {
+  background: #f4f4f5;
+  color: #18181b;
+}
+
+.pdf-reader-shell[data-theme="dark"] .explain-button:hover {
+  background: #ffffff;
+}
+
+.pdf-reader-shell[data-theme="dark"] .reader-ai-popup ul {
+  color: #d4d4d8;
+}
+

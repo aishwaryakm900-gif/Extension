@@ -260,6 +260,30 @@ export default function PdfReader() {
   const [explanation, setExplanation] = useState<Explanation | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [theme, setTheme] = useState<"light" | "dark">("light");
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("reader_theme");
+      if (saved === "light" || saved === "dark") {
+        setTheme(saved);
+      } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+        setTheme("dark");
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const handleThemeChange = (newTheme: "light" | "dark") => {
+    setTheme(newTheme);
+    try {
+      localStorage.setItem("reader_theme", newTheme);
+    } catch { }
+    if (typeof window !== "undefined" && (window as unknown as { chrome?: { storage?: { local?: { set: (data: Record<string, unknown>) => void } } } }).chrome?.storage?.local) {
+      (window as unknown as { chrome: { storage: { local: { set: (data: Record<string, unknown>) => void } } } }).chrome.storage.local.set({ reader_theme: newTheme });
+    }
+  };
 
   useEffect(() => {
     document.documentElement.setAttribute("data-reader-ai", "true");
@@ -459,6 +483,7 @@ export default function PdfReader() {
     <main
       className="pdf-reader-shell"
       data-reader-ai="true"
+      data-theme={theme}
       onMouseDown={(event) => {
         if (!(event.target as HTMLElement).closest(".reader-ai-popup")) {
           stopPronunciation();
@@ -469,6 +494,44 @@ export default function PdfReader() {
       <header className="pdf-reader-header">
         <div className="pdf-brand"><span>✦</span> READER AI</div>
         <div className="pdf-actions">
+          <div className="theme-segmented-control" role="radiogroup" aria-label="Reading theme">
+            <button
+              type="button"
+              className={`theme-option ${theme === "light" ? "active" : ""}`}
+              data-theme="light"
+              role="radio"
+              aria-checked={theme === "light"}
+              title="Switch to Light Theme"
+              onClick={() => handleThemeChange("light")}
+            >
+              <svg className="theme-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="5" />
+                <line x1="12" y1="1" x2="12" y2="3" />
+                <line x1="12" y1="21" x2="12" y2="23" />
+                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                <line x1="1" y1="12" x2="3" y2="12" />
+                <line x1="21" y1="12" x2="23" y2="12" />
+                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+              </svg>
+              <span>Light</span>
+            </button>
+            <button
+              type="button"
+              className={`theme-option ${theme === "dark" ? "active" : ""}`}
+              data-theme="dark"
+              role="radio"
+              aria-checked={theme === "dark"}
+              title="Switch to Dark Theme"
+              onClick={() => handleThemeChange("dark")}
+            >
+              <svg className="theme-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+              </svg>
+              <span>Dark</span>
+            </button>
+          </div>
           <span className="pdf-file-name">{fileName || "LOCAL PDF READER"}</span>
           <button type="button" className="open-pdf-button" onClick={() => inputRef.current?.click()}>Open PDF</button>
           <input ref={inputRef} type="file" accept="application/pdf,.pdf" hidden onChange={(event) => {
@@ -554,8 +617,8 @@ export default function PdfReader() {
                   {popup.context.selectionType === "partial-word"
                     ? `Explain "${popup.context.resolvedSelection}"`
                     : popup.context.selectionType === "passage"
-                    ? "Summarize with AI"
-                    : "Explain with AI"}
+                      ? "Summarize with AI"
+                      : "Explain with AI"}
                 </button>
               </>
             )}

@@ -291,21 +291,28 @@ export function normalizePronunciationTarget(term: string): string {
  * Generic Pronunciation Resolver
  * Works dynamically for any valid English word, phrase, CamelCase term, acronym, or technical symbol.
  */
-export function resolvePronunciation(term: string, customIpa?: string): PronunciationData | null {
+export function resolvePronunciation(
+  term: string,
+  customIpa?: string,
+  customPhonetic?: string,
+  customSpokenText?: string
+): PronunciationData | null {
   if (!term || !term.trim()) return null;
   const originalTerm = term.trim();
   const directLookup = originalTerm.toLowerCase();
 
+  const validCustomIpa = customIpa && isValidIpa(customIpa, originalTerm) ? customIpa : undefined;
+  const fallbackSpoken = customSpokenText || normalizeSpokenText(originalTerm);
+
   // 1. Direct Lexicon Match FIRST (preserves known tech terms like JavaScript, TypeScript, TensorFlow, OpenCV)
   if (LEXICON[directLookup]) {
     const entry = LEXICON[directLookup];
-    const validCustomIpa = customIpa && isValidIpa(customIpa, originalTerm) ? customIpa : undefined;
     return {
       resolvedTerm: originalTerm,
       originalTerm,
-      spokenText: entry.spokenText || normalizeSpokenText(originalTerm),
+      spokenText: entry.spokenText || fallbackSpoken,
       ipa: validCustomIpa || entry.ipa,
-      phonetic: entry.phonetic,
+      phonetic: entry.phonetic || customPhonetic,
       language: "en-US"
     };
   }
@@ -313,7 +320,8 @@ export function resolvePronunciation(term: string, customIpa?: string): Pronunci
   // 2. Resolve CamelCase target (e.g. "CloudComputing" -> "Cloud Computing")
   const resolvedTerm = isCamelCase(originalTerm) ? splitCamelCase(originalTerm) : originalTerm;
   const lookupKey = resolvedTerm.toLowerCase();
-  const validCustomIpa = customIpa && isValidIpa(customIpa, resolvedTerm) ? customIpa : undefined;
+  const validCustomIpaForResolved = customIpa && isValidIpa(customIpa, resolvedTerm) ? customIpa : validCustomIpa;
+  const fallbackSpokenForResolved = customSpokenText || normalizeSpokenText(resolvedTerm);
 
   // 3. Check if split term matches Lexicon
   if (LEXICON[lookupKey]) {
@@ -321,22 +329,22 @@ export function resolvePronunciation(term: string, customIpa?: string): Pronunci
     return {
       resolvedTerm,
       originalTerm,
-      spokenText: entry.spokenText || normalizeSpokenText(resolvedTerm),
-      ipa: validCustomIpa || entry.ipa,
-      phonetic: entry.phonetic,
+      spokenText: entry.spokenText || fallbackSpokenForResolved,
+      ipa: validCustomIpaForResolved || entry.ipa,
+      phonetic: entry.phonetic || customPhonetic,
       language: "en-US"
     };
   }
 
-  // 3. Check Plural Variations (e.g. "-es", "-s")
+  // 4. Check Plural Variations (e.g. "-es", "-s")
   if (lookupKey.endsWith("es") && LEXICON[lookupKey.slice(0, -2)]) {
     const base = LEXICON[lookupKey.slice(0, -2)];
     return {
       resolvedTerm,
       originalTerm,
-      spokenText: normalizeSpokenText(resolvedTerm),
-      ipa: base.ipa.replace(/\/$/, "ɪz/"),
-      phonetic: `${base.phonetic}-iz`,
+      spokenText: fallbackSpokenForResolved,
+      ipa: validCustomIpaForResolved || base.ipa.replace(/\/$/, "ɪz/"),
+      phonetic: customPhonetic || `${base.phonetic}-iz`,
       language: "en-US"
     };
   }
@@ -345,14 +353,14 @@ export function resolvePronunciation(term: string, customIpa?: string): Pronunci
     return {
       resolvedTerm,
       originalTerm,
-      spokenText: normalizeSpokenText(resolvedTerm),
-      ipa: base.ipa.replace(/\/$/, "z/"),
-      phonetic: `${base.phonetic}-z`,
+      spokenText: fallbackSpokenForResolved,
+      ipa: validCustomIpaForResolved || base.ipa.replace(/\/$/, "z/"),
+      phonetic: customPhonetic || `${base.phonetic}-z`,
       language: "en-US"
     };
   }
 
-  // 4. Pure All-Caps Acronym (e.g. "LLM", "SDK", "API", "CLI")
+  // 5. Pure All-Caps Acronym (e.g. "LLM", "SDK", "API", "CLI")
   if (/^[A-Z]{2,5}$/.test(originalTerm)) {
     const letters = originalTerm.toLowerCase().split("");
     const ipaParts: string[] = [];
@@ -369,15 +377,15 @@ export function resolvePronunciation(term: string, customIpa?: string): Pronunci
       return {
         resolvedTerm,
         originalTerm,
-        spokenText: letters.map((c) => c.toUpperCase()).join("-"),
-        ipa: ipaStr,
-        phonetic: phoneticParts.join("-"),
+        spokenText: customSpokenText || letters.map((c) => c.toUpperCase()).join("-"),
+        ipa: validCustomIpaForResolved || ipaStr,
+        phonetic: customPhonetic || phoneticParts.join("-"),
         language: "en-US"
       };
     }
   }
 
-  // 5. Multi-Word Phrase Composition (e.g. "Cloud Computing", "Machine Learning", "Deep Learning")
+  // 6. Multi-Word Phrase Composition (e.g. "Cloud Computing", "Machine Learning", "Deep Learning")
   const words = resolvedTerm.split(/\s+/).filter(Boolean);
   if (words.length > 1 && words.length <= 6) {
     const ipaTokens: string[] = [];
@@ -405,36 +413,36 @@ export function resolvePronunciation(term: string, customIpa?: string): Pronunci
       return {
         resolvedTerm,
         originalTerm,
-        spokenText: normalizeSpokenText(resolvedTerm),
-        ipa: validCustomIpa || `/${ipaTokens.join(" ")}/`,
-        phonetic: phoneticTokens.join(" "),
+        spokenText: fallbackSpokenForResolved,
+        ipa: validCustomIpaForResolved || `/${ipaTokens.join(" ")}/`,
+        phonetic: customPhonetic || phoneticTokens.join(" "),
         language: "en-US"
       };
     }
   }
 
-  // 6. Single Word G2P Engine
+  // 7. Single Word G2P Engine
   if (words.length === 1 && /^[a-zA-Z]+$/.test(words[0])) {
     const single = g2pSingleWord(words[0]);
     if (isValidIpa(single.ipa, words[0])) {
       return {
         resolvedTerm,
         originalTerm,
-        spokenText: normalizeSpokenText(resolvedTerm),
-        ipa: validCustomIpa || single.ipa,
-        phonetic: single.phonetic,
+        spokenText: fallbackSpokenForResolved,
+        ipa: validCustomIpaForResolved || single.ipa,
+        phonetic: customPhonetic || single.phonetic,
         language: "en-US"
       };
     }
   }
 
-  // 7. Fallback: If authentic IPA cannot be generated, omit IPA rather than display fake wrapped slashes!
+  // 8. Fallback: If authentic IPA cannot be generated, provide customPhonetic if present, omit fake IPA
   return {
     resolvedTerm,
     originalTerm,
-    spokenText: normalizeSpokenText(resolvedTerm),
-    ipa: validCustomIpa,
-    phonetic: undefined,
+    spokenText: fallbackSpokenForResolved,
+    ipa: validCustomIpaForResolved,
+    phonetic: customPhonetic,
     language: "en-US"
   };
 }

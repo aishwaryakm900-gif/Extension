@@ -18,6 +18,37 @@ let popupRoot: ShadowRoot | null = null;
 let activePopupElement: HTMLElement | null = null;
 let activeRange: Range | null = null;
 let interactingWithPopup = false;
+let currentTheme: "light" | "dark" = "light";
+
+try {
+  const saved = localStorage.getItem("reader_theme");
+  if (saved === "light" || saved === "dark") {
+    currentTheme = saved;
+  }
+} catch { }
+
+if (typeof chrome !== "undefined" && chrome.storage?.local) {
+  chrome.storage.local.get("reader_theme", (res) => {
+    if (res?.reader_theme === "light" || res?.reader_theme === "dark") {
+      currentTheme = res.reader_theme;
+      if (activePopupElement) {
+        activePopupElement.setAttribute("data-theme", currentTheme);
+      }
+    }
+  });
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes.reader_theme) {
+      const next = changes.reader_theme.newValue;
+      if (next === "light" || next === "dark") {
+        currentTheme = next;
+        if (activePopupElement) {
+          activePopupElement.setAttribute("data-theme", currentTheme);
+        }
+      }
+    }
+  });
+}
 
 type SelectionData = {
   originalSelection: string;
@@ -251,7 +282,7 @@ function extractSentenceFromText(text: string, selectedText: string): string {
   }
 
   const result = normalized.slice(sentenceStart, sentenceEnd).trim();
-  return result || selected;
+  return result;
 }
 
 const COMMON_TECH_TOKENS = new Set([
@@ -259,7 +290,10 @@ const COMMON_TECH_TOKENS = new Set([
   "nuxt.js", "nest.js", "express.js", "three.js", "d3.js", "angular.js", "backbone.js",
   "rxjs", "graphql", "postgresql", "mysql", "nosql", "sqlite", "mongodb",
   "tensorflow", "pytorch", "opencv", "langchain", "langgraph", "scikit-learn",
-  "rag", "llm", "nlp", "ocr", "api", "sdk", "cli", "gui", "ui", "ux", "css", "html"
+  "rag", "llm", "nlp", "ocr", "api", "sdk", "cli", "gui", "ui", "ux", "css", "html",
+  "sql", "json", "yaml", "xml", "jwt", "oauth", "rest", "grpc", "wasm", "docker",
+  "k8s", "kubernetes", "git", "github", "ci", "cd", "cpu", "gpu", "ram", "rom",
+  "dns", "http", "https", "ssh", "ssl", "tls", "tcp", "udp", "ip", "url", "uri", "dom", "crud"
 ]);
 
 function isTechnicalToken(word: string): boolean {
@@ -275,12 +309,19 @@ function isPhonotacticallyPlausible(word: string): boolean {
   if (!word) return false;
   const lower = word.toLowerCase().trim();
   if (isTechnicalToken(lower)) return true;
+
+  // Single letters: only 'a', 'i'
   if (lower.length === 1) return lower === "a" || lower === "i";
+
+  // Must have at least one vowel (a, e, i, o, u, y)
   if (!/[aeiouy]/.test(lower)) return false;
+
+  // Implausible English clusters
   if (/zq|qj|qk|qx|qz|jx|xj|vf|vj|vk|vx|vz|zf|zj|zk|zx/.test(lower)) return false;
-  if (/q(?!u)/.test(lower) && lower !== "faq") return false;
+  if (/q(?!u)/.test(lower) && lower !== "faq" && lower !== "sql") return false;
   if (/^[^aeiouy]{4,}/.test(lower) && !/^(?:str|spl|scr|spr|schw|phth)/.test(lower)) return false;
   if (/[^aeiouy]{5,}/.test(lower) && !/(?:lengths|strengths|angst)/.test(lower)) return false;
+
   return true;
 }
 
@@ -1397,6 +1438,109 @@ function renderPopup(data: SelectionData, range: Range): void {
     .secondary { background: #eeece5; color: #5d5b55; }
     .secondary:hover { background: #e3e0d8; }
     .action:disabled { cursor: default; opacity: .48; }
+
+    /* Dark Theme */
+    .popup[data-theme="dark"] {
+      background: #18181b;
+      border-color: #2e2e33;
+      box-shadow: 0 16px 44px rgba(0, 0, 0, 0.75), 0 4px 14px rgba(0, 0, 0, 0.5);
+      color: #e4e4e7;
+    }
+    .popup[data-theme="dark"] .header {
+      background: #18181b;
+      border-bottom-color: #27272a;
+      color: #f4f4f5;
+    }
+    .popup[data-theme="dark"] .spark {
+      color: #facc15;
+    }
+    .popup[data-theme="dark"] .close {
+      color: #a1a1aa;
+    }
+    .popup[data-theme="dark"] .close:hover {
+      background: #27272a;
+      color: #ffffff;
+    }
+    .popup[data-theme="dark"] .body {
+      scrollbar-color: #38383e transparent;
+    }
+    .popup[data-theme="dark"] .body::-webkit-scrollbar-thumb {
+      background-color: #38383e;
+    }
+    .popup[data-theme="dark"] .selection {
+      color: #ffffff;
+    }
+    .popup[data-theme="dark"] .part-of-speech {
+      color: #a1a1aa;
+    }
+    .popup[data-theme="dark"] .pronunciation-section {
+      background: #202024;
+      border-color: #2e2e33;
+    }
+    .popup[data-theme="dark"] .pronunciation-label {
+      color: #a1a1aa;
+    }
+    .popup[data-theme="dark"] .pronunciation-listen-btn {
+      background: #27272a;
+      border-color: #3f3f46;
+      color: #f4f4f5;
+    }
+    .popup[data-theme="dark"] .pronunciation-listen-btn:hover {
+      background: #323238;
+      border-color: #52525b;
+    }
+    .popup[data-theme="dark"] .pronunciation-listen-btn.speaking {
+      background: #2563eb;
+      border-color: #3b82f6;
+      color: #ffffff;
+    }
+    .popup[data-theme="dark"] .pronunciation-sounds-like {
+      color: #a1a1aa;
+    }
+    .popup[data-theme="dark"] .pronunciation-sounds-like .phonetic-text {
+      color: #ffffff;
+    }
+    .popup[data-theme="dark"] .pronunciation-ipa {
+      color: #93c5fd;
+    }
+    .popup[data-theme="dark"] .speaker-btn {
+      background: #27272a;
+      border-color: #3f3f46;
+      color: #e4e4e7;
+    }
+    .popup[data-theme="dark"] .speaker-btn:hover {
+      background: #323238;
+      color: #ffffff;
+      border-color: #52525b;
+    }
+    .popup[data-theme="dark"] .speaker-btn.speaking {
+      background: #2563eb;
+      border-color: #3b82f6;
+      color: #ffffff;
+    }
+    .popup[data-theme="dark"] .label {
+      color: #a1a1aa;
+    }
+    .popup[data-theme="dark"] .context,
+    .popup[data-theme="dark"] .copy,
+    .popup[data-theme="dark"] .example {
+      color: #d4d4d8;
+    }
+    .popup[data-theme="dark"] .action {
+      background: #f4f4f5;
+      color: #18181b;
+    }
+    .popup[data-theme="dark"] .action:hover {
+      background: #ffffff;
+    }
+    .popup[data-theme="dark"] .secondary {
+      background: #27272a;
+      color: #e4e4e7;
+    }
+    .popup[data-theme="dark"] .secondary:hover {
+      background: #323238;
+    }
+
     @keyframes reader-ai-pulse { 0%, 100% { opacity: .25; transform: scale(.75); } 50% { opacity: 1; transform: scale(1.1); } }
   `;
   popupRoot.appendChild(style);
@@ -1405,6 +1549,7 @@ function renderPopup(data: SelectionData, range: Range): void {
   popup.className = "popup";
   popup.setAttribute("role", "dialog");
   popup.setAttribute("aria-label", "Reader AI context");
+  popup.setAttribute("data-theme", currentTheme);
 
   const header = document.createElement("header");
   header.className = "header";
@@ -1493,8 +1638,8 @@ function renderPopup(data: SelectionData, range: Range): void {
   explain.textContent = data.selectionType === "partial-word"
     ? `Explain "${data.resolvedSelection}"`
     : data.selectionType === "passage"
-    ? "Summarize with AI"
-    : "Explain with AI";
+      ? "Summarize with AI"
+      : "Explain with AI";
 
   explain.addEventListener("click", (e) => {
     e.stopPropagation();

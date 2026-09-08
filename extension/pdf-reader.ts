@@ -10,6 +10,8 @@ import {
 
 const viewer = document.querySelector<HTMLElement>("#viewer");
 const title = document.querySelector<HTMLElement>("#document-title");
+const lightBtn = document.querySelector<HTMLButtonElement>("#theme-light-btn");
+const darkBtn = document.querySelector<HTMLButtonElement>("#theme-dark-btn");
 const params = new URLSearchParams(window.location.search);
 const sourceUrl = params.get("url");
 let popup: HTMLElement | null = null;
@@ -18,6 +20,79 @@ const POPUP_WIDTH = 320;
 const VIEWPORT_MARGIN = 16;
 const SELECTION_GAP = 8;
 const MAX_POPUP_HEIGHT = 650;
+
+type Theme = "light" | "dark";
+
+function applyTheme(theme: Theme): void {
+  document.documentElement.setAttribute("data-theme", theme);
+  document.body.setAttribute("data-theme", theme);
+  if (lightBtn) {
+    lightBtn.classList.toggle("active", theme === "light");
+    lightBtn.setAttribute("aria-checked", String(theme === "light"));
+  }
+  if (darkBtn) {
+    darkBtn.classList.toggle("active", theme === "dark");
+    darkBtn.setAttribute("aria-checked", String(theme === "dark"));
+  }
+}
+
+function setTheme(theme: Theme): void {
+  applyTheme(theme);
+  try {
+    localStorage.setItem("reader_theme", theme);
+  } catch { }
+  if (typeof chrome !== "undefined" && chrome.storage?.local) {
+    chrome.storage.local.set({ reader_theme: theme }, () => {
+      if (chrome.runtime.lastError) {
+        // ignore errors
+      }
+    });
+  }
+}
+
+function initTheme(): void {
+  let initialTheme: Theme = "light";
+  try {
+    const saved = localStorage.getItem("reader_theme") as Theme | null;
+    if (saved === "light" || saved === "dark") {
+      initialTheme = saved;
+    } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+      initialTheme = "dark";
+    }
+  } catch {
+    // fallback
+  }
+
+  applyTheme(initialTheme);
+
+  if (typeof chrome !== "undefined" && chrome.storage?.local) {
+    chrome.storage.local.get("reader_theme", (res) => {
+      if (res?.reader_theme === "light" || res?.reader_theme === "dark") {
+        applyTheme(res.reader_theme);
+      }
+    });
+
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === "local" && changes.reader_theme) {
+        const next = changes.reader_theme.newValue as Theme;
+        if (next === "light" || next === "dark") {
+          applyTheme(next);
+        }
+      }
+    });
+  }
+
+  window.addEventListener("storage", (e) => {
+    if (e.key === "reader_theme" && (e.newValue === "light" || e.newValue === "dark")) {
+      applyTheme(e.newValue);
+    }
+  });
+
+  lightBtn?.addEventListener("click", () => setTheme("light"));
+  darkBtn?.addEventListener("click", () => setTheme("dark"));
+}
+
+initTheme();
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "pdf.worker.js";
 
@@ -123,7 +198,10 @@ const COMMON_TECH_TOKENS = new Set([
   "nuxt.js", "nest.js", "express.js", "three.js", "d3.js", "angular.js", "backbone.js",
   "rxjs", "graphql", "postgresql", "mysql", "nosql", "sqlite", "mongodb",
   "tensorflow", "pytorch", "opencv", "langchain", "langgraph", "scikit-learn",
-  "rag", "llm", "nlp", "ocr", "api", "sdk", "cli", "gui", "ui", "ux", "css", "html"
+  "rag", "llm", "nlp", "ocr", "api", "sdk", "cli", "gui", "ui", "ux", "css", "html",
+  "sql", "json", "yaml", "xml", "jwt", "oauth", "rest", "grpc", "wasm", "docker",
+  "k8s", "kubernetes", "git", "github", "ci", "cd", "cpu", "gpu", "ram", "rom",
+  "dns", "http", "https", "ssh", "ssl", "tls", "tcp", "udp", "ip", "url", "uri", "dom", "crud"
 ]);
 
 function isTechnicalToken(word: string): boolean {
@@ -139,12 +217,19 @@ function isPhonotacticallyPlausible(word: string): boolean {
   if (!word) return false;
   const lower = word.toLowerCase().trim();
   if (isTechnicalToken(lower)) return true;
+
+  // Single letters: only 'a', 'i'
   if (lower.length === 1) return lower === "a" || lower === "i";
+
+  // Must have at least one vowel (a, e, i, o, u, y)
   if (!/[aeiouy]/.test(lower)) return false;
+
+  // Implausible English clusters
   if (/zq|qj|qk|qx|qz|jx|xj|vf|vj|vk|vx|vz|zf|zj|zk|zx/.test(lower)) return false;
-  if (/q(?!u)/.test(lower) && lower !== "faq") return false;
+  if (/q(?!u)/.test(lower) && lower !== "faq" && lower !== "sql") return false;
   if (/^[^aeiouy]{4,}/.test(lower) && !/^(?:str|spl|scr|spr|schw|phth)/.test(lower)) return false;
   if (/[^aeiouy]{5,}/.test(lower) && !/(?:lengths|strengths|angst)/.test(lower)) return false;
+
   return true;
 }
 
